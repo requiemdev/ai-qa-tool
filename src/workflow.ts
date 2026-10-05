@@ -20,6 +20,7 @@
 import { readFile } from "node:fs/promises";
 import pc from "picocolors";
 import { join, resolve } from "node:path";
+import { git } from "./context.js";
 import { localUrl, record } from "./contracts.js";
 import { baseCandidates, collectBranch, createSnapshot } from "./branch.js";
 import {
@@ -28,6 +29,7 @@ import {
   saveSession,
   feedback,
   coverageGaps,
+  isDeep,
   type Session,
 } from "./session.js";
 import {
@@ -52,7 +54,7 @@ import { DEFAULT_TIMEOUT, invokeCodex } from "./codex.js";
  * Configuration options supplied to initialize or resume a QA checking session.
  */
 export type CheckOptions = {
-  /** Target repository root directory. Defaults to cwd. */
+  /** Target repository root directory. Required; prompted when omitted. */
   repo?: string;
   /** Running application localhost URL. */
   url?: string;
@@ -66,6 +68,9 @@ export type CheckOptions = {
   base?: string;
   /** Whether to include local working tree modifications and untracked files. */
   local?: boolean;
+  committedOnly?: boolean;
+  deep?: boolean;
+  followup?: boolean;
   /** Explicit glob patterns or file paths to include as supporting context. */
   context?: string[];
   /** Identifier of an existing session to resume. */
@@ -104,49 +109,31 @@ async function collectInput(
   options: CheckOptions,
   ui: Terminal,
 ): Promise<Session["input"]> {
-  const repo = resolve(
-    await ui.required("Repository", options.repo ?? process.cwd()),
-  );
-  let base = options.base ?? "";
-  if (!base) {
-    const candidates = await baseCandidates(repo);
-    ui.show(
-      "Available bases: " +
-        (candidates.join(", ") || "none detected; supply a ref"),
-    );
-    base = await ui.required(
-      "Base branch/ref (no fetch)",
-      candidates.length === 1 ? candidates[0]! : "",
-    );
+  const suppliedRepo = options.repo ?? (await ui.required("Repository path"));
+  if (!suppliedRepo.trim()) {
+    throw new Error("Repository path is required.");
   }
-  const url = localUrl(
-    await ui.required("Running localhost URL", options.url ?? ""),
-  );
-  const intent = await ui.required(
-    "Feature/bug-fix description",
-    options.intent ?? "",
-  );
-  const criteria = options.criteria?.length
-    ? options.criteria
-    : (await ui.required("Acceptance criteria (separate with |)", intent))
-        .split("|")
-        .map((value) => value.trim());
-  if (criteria.some((value) => !value)) {
+  const repo = (
+    await git(resolve(suppliedRepo), ["rev-parse", "--show-toplevel"])
+  ).trim();
+  const base = options.base ?? (await baseCandidates(repo))[0] ??
+    (await ui.required("Comparison reference (no fetch)"));
+  const url = localUrl(options.url ?? await ui.required("Running localhost URL"));
+  const intent = options.intent ?? (await ui.required("Feature/bug-fix description"));
+  if (!intent.trim()) { throw new Error("Intent cannot be empty."); }
+  const criteria = options.criteria?.length ? options.criteria : [intent];
+  if (criteria.some(value => !value.trim())) {
     throw new Error("Acceptance criteria cannot be empty.");
   }
-  let changeType =
-    options.changeType ??
-    (await ui.required("Change type: feature / bug-fix", "feature"));
-  while (changeType !== "feature" && changeType !== "bug-fix") {
-    changeType = await ui.required("Choose feature or bug-fix");
+  const changeType = options.changeType ?? "feature";
+  if (changeType !== "feature" && changeType !== "bug-fix") {
+    throw new Error("--change-type must be feature or bug-fix.");
   }
-  const local =
-    options.local ??
-    (await ui.confirm(
-      "Include tracked local edits and eligible untracked files",
-    ));
+  const local = options.committedOnly ? false : options.local ?? true;
   const timeout = validTimeout(options.timeout ?? DEFAULT_TIMEOUT);
   return {
+    depth: options.deep ? "deep" : "standard",
+    explicitCriteria: Boolean(options.criteria?.length),
     repo,
     url,
     intent,
@@ -250,6 +237,7 @@ async function assessFindings(session: Session, ui: Terminal): Promise<void> {
       role: "reviewer",
       schema: findingReviewSchema,
       signal: ui.controller.signal,
+      reasoning: isDeep(session) ? "xhigh" : "medium",
       timeout: session.input.timeout,
       ...(session.input.model ? { model: session.input.model } : {}),
       progress,
@@ -347,7 +335,11 @@ export async function check(
   ui = new Terminal(),
 ): Promise<Session> {
   let session: Session | undefined;
+  let freshExecutionApproval = false;
   try {
+    if (options.local && options.committedOnly) {
+      throw new Error("--include-local and --committed-only cannot be combined.");
+    }
     const requestedTimeout =
       options.timeout === undefined ? undefined : validTimeout(options.timeout);
     session = options.session
@@ -382,25 +374,31 @@ export async function check(
         }
         ui.section("Branch context");
         ui.show(
-          `Branch ${session.context.branch || "(detached)"}\nHead ${session.context.head}\nBase ${session.context.base}\nMerge base ${session.context.mergeBase}\nCommits:\n${session.context.commits.map((item) => item.sha.slice(0, 8) + " " + item.subject + (item.body ? "\n" + item.body : "")).join("\n") || "(none)"}\nChanged areas:\n${session.context.changes.map((item) => item.status + " " + item.path).join("\n")}\nDetected runners: ${session.context.runners.map((item) => item.kind).join(", ") || "none"}\nOmitted context: ${session.context.skipped.join(", ") || "none"}`,
+          `Target branch ${session.context.branch || "(detached)"}\nHead ${session.context.head}\nComparison reference ${session.input.base} (${session.context.base})\nMerge base ${session.context.mergeBase}\nCommits:\n${session.context.commits.map((item) => item.sha.slice(0, 8) + " " + item.subject + (item.body ? "\n" + item.body : "")).join("\n") || "(none)"}\nChanged areas:\n${session.context.changes.map((item) => item.status + " " + item.path).join("\n")}\nDetected runners: ${session.context.runners.map((item) => item.kind).join(", ") || "none"}\nUncommitted work (${session.input.local ? "included" : "excluded"}): ${session.context.localChanges?.map(item => item.status + " " + item.path).join(", ") || "none"}\nUntracked paths: ${session.context.untracked.join(", ") || "none"}\nExcluded files: ${session.context.skipped.join(", ") || "none"}`,
         );
-        if (
-          !(await ui.confirm(
-            "Does the supplied running server represent this selected source",
-          ))
-        ) {
-          throw new Error(
-            "Server/source mismatch; prepare the matching server before resuming.",
+        if (isDeep(session)) {
+          if (
+            !(await ui.confirm(
+              "Does the supplied running server represent this selected source",
+            ))
+          ) {
+            throw new Error(
+              "Server/source mismatch; prepare the matching server before resuming.",
+            );
+          }
+          session.assumptions.serverMatchesSource = true;
+          session.assumptions.repeatableData = await ui.confirm(
+            "Is test data repeatable/resettable for exploration and fresh-context replay",
           );
-        }
-        session.assumptions.serverMatchesSource = true;
-        session.assumptions.repeatableData = await ui.confirm(
-          "Is test data repeatable/resettable for exploration and fresh-context replay",
-        );
-        if (!session.assumptions.repeatableData) {
-          throw new Error(
-            "Prepare repeatable test data; browser isolation does not reset backend state.",
-          );
+          if (!session.assumptions.repeatableData) {
+            throw new Error(
+              "Prepare repeatable test data; browser isolation does not reset backend state.",
+            );
+          }
+          session.assumptions.basis = "developer-confirmed";
+        } else {
+          session.assumptions = { serverMatchesSource: true, repeatableData: true, basis: "assumed" };
+          ui.show("Assumed prerequisites: server represents the selected source; development data is repeatable/resettable. Browser isolation does not reset backend state.");
         }
         session.stage = "plan";
         await saveSession(session);
@@ -431,7 +429,25 @@ export async function check(
             );
           }
         }
-        await reviewScenarios(session, ui);
+        if (isDeep(session)) {
+          await reviewScenarios(session, ui);
+        } else {
+          for (const item of session.scenarios) {
+            if (item.status !== "excluded") { item.status = "selected"; }
+          }
+          ui.show(session.scenarios.map(item => `${item.id} [${item.status}] ${item.title} (${item.criteria.join(", ")})\n  ${item.steps.join(" → ")}\n  Expect: ${item.expected}`).join("\n\n"));
+          feedback(session, "plan", "automatically-selected", "Displayed scenarios selected automatically; this is not developer approval.");
+          if (!session.scenarios.length) {
+            const limitation = "No browser-verifiable behavior identified. Standard review cannot verify this change; use --deep for existing-runner unit/integration coverage.";
+            session.gaps.push(limitation);
+            session.status = "blocked";
+            session.reason = limitation;
+            session.stage = "complete";
+            ui.warn(limitation);
+            await saveSession(session);
+            return session;
+          }
+        }
         session.stage = "explore";
         await saveSession(session);
       }
@@ -456,7 +472,7 @@ export async function check(
         await saveSession(session);
       }
       if (session.stage === "review-tests") {
-        if (!session.revisions.at(-1)?.review) {
+        if (isDeep(session) && !session.revisions.at(-1)?.review) {
           ui.section("Review");
           await ui.working(
             "Independently reviewing generated assertions",
@@ -466,6 +482,7 @@ export async function check(
           await saveSession(session);
         }
         const action = await reviewTests(session, ui);
+        freshExecutionApproval = action === "execute";
         session.stage =
           action === "execute"
             ? "execute"
@@ -480,13 +497,19 @@ export async function check(
       if (session.stage === "execute") {
         // A reopened interrupted execution requires approval again, with the same hashes.
         ui.section("Execute");
-        if (
-          !(await ui.confirm(
-            "Execute approved revision against the confirmed server and prepared test data",
-          ))
-        ) {
-          throw new Error("Execution deferred.");
+        if (!freshExecutionApproval) {
+          if (!isDeep(session)) {
+            const action = await reviewTests(session, ui);
+            if (action !== "execute") {
+              session.stage = action === "regenerate" ? "generate" : "review-tests";
+              await saveSession(session);
+              continue;
+            }
+          } else if (!(await ui.confirm("Resume interrupted execution of approved files against the confirmed server and prepared data"))) {
+            throw new Error("Execution deferred.");
+          }
         }
+        freshExecutionApproval = false;
         await ui.working("Executing approved tests", (progress) =>
           executeRevision(session!, ui.controller.signal, progress),
         );
@@ -494,7 +517,15 @@ export async function check(
         await saveSession(session);
       }
       if (session.stage === "findings" || session.stage === "complete") {
-        if (session.stage === "findings") {
+        if (!isDeep(session) && !options.followup) {
+          await reviewFindings(session, ui, false);
+          ui.show([...coverageGaps(session), ...unresolvedGaps(session)].join("\n") || "Selected coverage complete.");
+          finishStatus(session);
+          session.stage = "complete";
+          await saveSession(session);
+          return session;
+        }
+        if (isDeep(session) && session.stage === "findings") {
           try {
             await assessFindings(session, ui);
           } catch (error) {

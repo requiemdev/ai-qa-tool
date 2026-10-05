@@ -18,6 +18,7 @@ import {
 import { executeRevision } from "../src/execution.js";
 
 class FixtureReview extends Terminal {
+  prompts: string[] = [];
   constructor() {
     super(new PassThrough());
   }
@@ -37,7 +38,12 @@ class FixtureReview extends Terminal {
     }
   }
   override async ask(prompt: string, fallback = ""): Promise<string> {
+    this.prompts.push(prompt);
     console.log("FIXTURE REVIEW: " + prompt);
+    if (prompt.startsWith("Run all")) {
+      assert(this.sourceShown);
+      return "run all";
+    }
     if (
       prompt.startsWith("Repository") ||
       prompt.startsWith("Running localhost") ||
@@ -117,7 +123,7 @@ class FixtureReview extends Terminal {
 }
 
 test(
-  "live Codex guided session explores dynamic states, reviews/replays, reports, exports and detects unchanged-assertion regression",
+  "live Codex fluid session records prompt/stage/time metrics and detects unchanged-assertion regression",
   { timeout: 1_200_000 },
   async () => {
     const previous = process.env.AGENT_QA_RESUME_SESSION
@@ -177,25 +183,30 @@ test(
     const address = server.address();
     assert(address && typeof address !== "string");
     try {
+      const ui = new FixtureReview();
+      const started = Date.now();
+      const deep = process.env.AGENT_QA_DEEP === "1";
       const session = await check(
         previous
           ? { session: previous.id }
           : {
               repo,
+              deep,
+              headless: true,
               base: "main",
               local: false,
               url: `http://127.0.0.1:${address.port}/`,
               intent:
-                "Create item opens a dialog with required Name. Entering Ada and clicking Create closes the dialog and shows Created Ada. Empty submission must keep the dialog open and not create a result. formatResult(name) formats the confirmation and keeps its existing behavior. Use Ada only and no backend services.",
+                "Create item opens a dialog with required Name. Entering Ada and clicking Create closes the dialog and shows Created Ada. Empty submission must keep the dialog open and not create a result. Use Ada only and no backend services.",
               criteria: [
                 "Create item opens the named dialog; submitting Name Ada closes it and displays Created Ada.",
                 "Empty required Name blocks submission and keeps the dialog open.",
-                'formatResult("Ada") returns "Created Ada".',
+                ...(deep ? ['formatResult("Ada") returns "Created Ada".'] : []),
               ],
               changeType: "feature",
               timeout: 600_000,
             },
-        new FixtureReview(),
+        ui,
       );
       assert.equal(
         session.status,
@@ -204,7 +215,17 @@ test(
       );
       assert.equal(sessionExitCode(session), 0);
       assert(session.explorations.some((item) => item.status === "observed"));
-      assert(session.exports.length > 0);
+      if (deep || (previous && previous.input.depth !== "standard")) {
+        assert(session.exports.length > 0);
+      } else {
+        assert.equal(ui.prompts.length, 1, ui.prompts.join("\n"));
+        assert.equal(session.exports.length, 0);
+      }
+      const invocations = (await readdir(session.dir, {recursive: true})).filter(path => path.endsWith("invocation.json"));
+      const metrics = { depth: session.input.depth ?? "deep (legacy)", promptCount: ui.prompts.length, aiStageCount: invocations.length, elapsedMs: Date.now() - started, session: session.id };
+      if (!deep && !previous) { assert.equal(metrics.aiStageCount, 3); }
+      await writeFile(join(session.dir, "live-metrics.json"), JSON.stringify(metrics, null, 2));
+      console.log("LIVE METRICS: " + JSON.stringify(metrics));
       const explorationDir = (await readdir(session.dir)).find((path) =>
         path.startsWith("exploration-"),
       )!;
@@ -244,6 +265,7 @@ test(
       assert(failureEvidence.some((path) => path.endsWith("trace.zip")));
       assert(failureEvidence.some((path) => path.endsWith(".png")));
       session.status = "failed";
+      session.reason = "Deliberate fixture regression failed with unchanged approved assertions; the original passing run is retained.";
       await saveSession(session);
       console.log(`LIVE SESSION EVIDENCE: ${session.dir}`);
     } finally {

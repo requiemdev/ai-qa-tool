@@ -12,12 +12,13 @@ import { check, exportSession } from "./src/workflow.js";
 import { sessionExitCode } from "./src/session.js";
 
 const help = `agent-qa [check] [--repo <path>] [--base <ref>] [--url <localhost URL>] [--intent <description>]
-  [--criteria <criterion> ...] [--change-type feature|bug-fix] [--include-local] [--context <file> ...]
+  [--criteria <criterion> ...] [--change-type feature|bug-fix] [--include-local | --committed-only] [--deep] [--context <file> ...]
   [--model <Codex model override>] [--timeout <milliseconds>] [--headless]
 agent-qa review --session <id>
 agent-qa export --session <id>
 agent-qa check --session <id>
-Guided: describe → analyse → review scenarios → explore → review tests → execute → findings → export.
+Default: select repo → URL and intent → analyse/explore → generate → approve and run → report.
+--deep adds detailed scenario review, unit/integration coverage, and independent review.
 Ctrl-C or cancel retains partial results. Artifacts: .agent-qa/session-*/.
 
 `;
@@ -44,6 +45,8 @@ async function main(): Promise<void> {
         criteria: { type: "string", multiple: true },
         "change-type": { type: "string" },
         "include-local": { type: "boolean" },
+        "committed-only": { type: "boolean" },
+        deep: { type: "boolean" },
         context: { type: "string", multiple: true },
         session: { type: "string" },
         model: { type: "string" },
@@ -64,6 +67,7 @@ async function main(): Promise<void> {
       return;
     }
     const result = await check({
+      followup: cmd === "review",
       ...(values.repo ? { repo: values.repo } : {}),
       ...(values.url ? { url: values.url } : {}),
       ...(values.intent ? { intent: values.intent } : {}),
@@ -73,6 +77,8 @@ async function main(): Promise<void> {
       ...(values["include-local"] !== undefined
         ? { local: values["include-local"] }
         : {}),
+      ...(values["committed-only"] !== undefined ? { committedOnly: values["committed-only"] } : {}),
+      ...(values.deep !== undefined ? { deep: values.deep } : {}),
       ...(values.context ? { context: values.context } : {}),
       ...(values.session ? { session: values.session } : {}),
       ...(values.model ? { model: values.model } : {}),

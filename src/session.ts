@@ -25,6 +25,12 @@ import { record } from "./contracts.js";
  */
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
+// Missing depth identifies legacy sessions, which keep their detailed workflow.
+export const isDeep = (session: Session): boolean =>
+  session.input.depth !== "standard";
+export const scenarioSelected = (item: Scenario): boolean =>
+  item.status === "approved" || item.status === "selected";
+
 /**
  * Computes hexadecimal SHA-256 digest of input string content.
  *
@@ -51,7 +57,7 @@ export type Scenario = {
   /** Expected outcome after executing the steps. */
   expected: string;
   /** Current approval status of the scenario. */
-  status: "pending" | "approved" | "excluded";
+  status: "pending" | "selected" | "approved" | "excluded";
   /** Rationale if the scenario was modified or excluded. */
   reason: string;
 };
@@ -153,7 +159,7 @@ export type Finding = {
 };
 
 /**
- * Developer review decision or guidance recorded on a session entity.
+ * Automatic selection or developer review recorded on a session entity.
  */
 export type Feedback = {
   /** Unique feedback UUID. */
@@ -198,6 +204,8 @@ export type Session = {
   status: "active" | "passed" | "failed" | "blocked" | "cancelled";
   /** Initial CLI input options and parameters. */
   input: {
+    depth?: "standard" | "deep";
+    explicitCriteria?: boolean;
     repo: string;
     url: string;
     intent: string;
@@ -212,8 +220,8 @@ export type Session = {
   };
   /** Collected Git context and file tree. */
   context?: BranchContext;
-  /** Assumptions confirmed by the developer. */
-  assumptions: { serverMatchesSource: boolean; repeatableData: boolean };
+  /** Prerequisites, with assumed or developer-confirmed provenance. */
+  assumptions: { serverMatchesSource: boolean; repeatableData: boolean; basis?: "assumed" | "developer-confirmed" };
   /** High-level summary of proposed test strategy. */
   summary: string;
   /** Discrepancies between intent and commit log. */
@@ -342,6 +350,7 @@ export async function loadSession(id: string): Promise<Session> {
         typeof (value.input as Record<string, unknown>)[key] !== "string",
     ) ||
     !Array.isArray(value.input.criteria) ||
+    (value.input.depth !== undefined && !["standard", "deep"].includes(String(value.input.depth))) ||
     !record(value.assumptions) ||
     typeof value.summary !== "string" ||
     ![
@@ -411,7 +420,7 @@ export function sessionExitCode(session: Session): number {
 export function coverageGaps(session: Session): string[] {
   const revision = session.revisions.at(-1);
   return session.scenarios
-    .filter((item) => item.status === "approved")
+    .filter(scenarioSelected)
     .flatMap((item) => {
       const observed = session.explorations.find(
         (flow) => flow.scenarioId === item.id && flow.status !== "incomplete",
@@ -466,7 +475,6 @@ export function renderReport(session: Session): string {
   const gapsList = [
     ...session.gaps,
     ...coverageGaps(session),
-    ...(session.context?.skipped ?? []),
   ];
   const gapsText =
     gapsList.map((item) => `- ${item}`).join("\n") || "None recorded.";
@@ -515,14 +523,18 @@ export function renderReport(session: Session): string {
     `# QA session ${session.id}\n\n` +
     `Status: **${session.status}**. Stage: ${session.stage}. ${session.reason}\n\n` +
     `${session.summary}\n\n` +
+    `Review depth: ${isDeep(session) ? "deep" : "standard"}.\n\n` +
+    `Skipped modules: ${isDeep(session) ? "none by default" : "generated unit/integration tests, independent AI test review, finding assessment/classification, automatic export"}.\n\n` +
     `## Source and assumptions\n\n` +
     `Repository: ${session.input.repo}\n\n` +
-    `Base: ${session.context?.base ?? session.input.base}; head: ${session.context?.head ?? "pending"}; merge base: ${session.context?.mergeBase ?? "pending"}; local edits: ${session.input.local}.\n\n` +
-    `Server source revision developer-confirmed: ${session.assumptions.serverMatchesSource}. Backend reset/repeatable data developer-confirmed: ${session.assumptions.repeatableData}. Browser isolation does not reset backend state or isolate the OS. Generated tests run as trusted reviewed local code.\n\n` +
+    `Target branch: ${session.context?.branch || "(detached/pending)"}; comparison reference: ${session.input.base}; head: ${session.context?.head ?? "pending"}; merge base: ${session.context?.mergeBase ?? "pending"}; local edits: ${session.input.local}.\n\n` +
+    `Prerequisites (${session.assumptions.basis ?? "developer-confirmed"}): server represents selected source: ${session.assumptions.serverMatchesSource}. Backend data repeatable/resettable: ${session.assumptions.repeatableData}. Browser isolation does not reset backend state or isolate the OS. Generated tests run as trusted reviewed local code.\n\n` +
     `## Acceptance scope\n\n` +
     `${criteriaText}\n\n` +
     `${scenariosText}\n\n` +
-    `## Coverage gaps and omitted context\n\n` +
+    `## Excluded files\n\n${session.context?.skipped.join("\n") || "None."}\n\n` +
+    `## Uncommitted work\n\n${session.context?.localChanges?.map(item => item.status + " " + item.path).join("\n") || "None recorded."}\n\nEligible untracked selection: ${session.input.local ? "included" : "excluded (--committed-only)"}; untracked paths: ${session.context?.untracked.join(", ") || "none"}.\n\n` +
+    `## Coverage gaps\n\n` +
     `${gapsText}\n\n` +
     `## Exploration\n\n` +
     `${explorationsText}\n\n` +
@@ -530,7 +542,7 @@ export function renderReport(session: Session): string {
     `${executionsText}\n\n` +
     `## Findings\n\n` +
     `${findingsText}\n\n` +
-    `## Developer feedback (append only)\n\n` +
+    `## Selection and developer feedback (append only)\n\n` +
     `${feedbackText}\n\n` +
     `## Accepted exports\n\n` +
     `${exportsText}\n`

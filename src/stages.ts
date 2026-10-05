@@ -22,6 +22,8 @@ import { excluded } from "./context.js";
 import { safeRelative } from "./branch.js";
 import {
   sha256,
+  isDeep,
+  scenarioSelected,
   type Session,
   type Scenario,
   type GeneratedTest,
@@ -33,7 +35,7 @@ const strings = { type: "array", items: string };
 const gaps = {
   type: "array",
   description:
-    "Only concrete unresolved approved behavior, missing prerequisites, or omitted relevant context. No summaries, progress messages, routine upcoming stages, or resolved checks.",
+    "Only concrete missing acceptance behavior or prerequisites that prevent the selected checks. Use an empty array when none. Never list pending runtime verification, deliberately skipped modules, unchanged helper coverage, absence of unnecessary backend services, summaries, or progress messages.",
   items: string,
 };
 const object = (properties: Record<string, object>) => ({
@@ -183,6 +185,7 @@ function aiOptions(
 ) {
   return {
     ...(session.input.model ? { model: session.input.model } : {}),
+    reasoning: isDeep(session) ? "xhigh" as const : "medium" as const,
     timeout: session.input.timeout,
     signal,
     progress,
@@ -207,7 +210,7 @@ export async function analyse(
     dir: join(session.dir, "analysis-" + Date.now()),
     role: "qa-expert",
     schema: planSchema,
-    prompt: `Map developer acceptance criteria AC1..AC${session.input.criteria.length} to normal behavior, relevant errors/boundaries, and regressions at the changed behavior boundary. Use the line-level diff and affected components to keep scope narrow: do not test unchanged sibling cards, modals, or page controls merely because they share the same screen. Add keyboard, negative-input, and state-transition checks only when the changed behavior or a directly shared handler/container can affect them; label inferred checks and keep them on the affected surface. Every scenario's criteria field MUST contain only exact acceptance IDs such as ["AC1"] or ["AC1","AC2"], never descriptions, prefixes, or other prose. Put human-readable explanations in the scenario title, steps, expected value, summary, or gaps. Every scenario must include at least one exact acceptance ID. Flag conflicts between intent and commit subjects/bodies, and explicitly report omitted/uncovered behavior. Browser replay is supplied by this tool with its own Playwright installation; target-repo browser dependencies are unnecessary. Routine upcoming exploration/execution is not a coverage gap. Do not invent requirements or strict focus-confinement expectations; scope keyboard checks to documented usability. Label inferred regression invariants and hypotheses explicitly for developer review.\n${JSON.stringify({ input: session.input, context: session.context })}`,
+    prompt: `${isDeep(session) ? "Detailed review: include relevant unit/integration scenarios through existing runners." : `Standard review: ${session.input.explicitCriteria ? "Explicit criteria override the 1–3 scenario target; cover each criterion." : "Target 1–3 browser scenarios for changed behavior and its most relevant regression."} Avoid broad UX checks and routine edge-case expansion. If changes have no browser-verifiable behavior, return no scenarios, record an explicit limitation and suggest --deep for unit/integration coverage. Flag only conflicting evidence that materially changes expected behavior. At this analysis stage, browser verification is pending by design, never a gap. Existing tests and unchanged imported helpers/configuration are supporting context, not additional acceptance scope. Standard-depth unit/integration and independent-review skips are reported separately by the tool, never as gaps. Return gaps: [] unless a concrete acceptance criterion cannot be covered or a required prerequisite is missing. These scope instructions override broad role guidance.`}\nMap developer acceptance criteria AC1..AC${session.input.criteria.length} to normal behavior, relevant errors/boundaries, and regressions at the changed behavior boundary. Use the line-level diff and affected components to keep scope narrow: do not test unchanged sibling cards, modals, or page controls merely because they share the same screen. Add keyboard, negative-input, and state-transition checks only when the changed behavior or a directly shared handler/container can affect them; label inferred checks and keep them on the affected surface. Every scenario's criteria field MUST contain only exact acceptance IDs such as ["AC1"] or ["AC1","AC2"], never descriptions, prefixes, or other prose. Put human-readable explanations in the scenario title, steps, expected value, summary, or gaps. Every scenario must include at least one exact acceptance ID. Flag conflicts between intent and commit subjects/bodies, and explicitly report omitted/uncovered behavior. Browser replay is supplied by this tool with its own Playwright installation; target-repo browser dependencies are unnecessary. Routine upcoming exploration/execution is not a coverage gap. Do not invent requirements or strict focus-confinement expectations; scope keyboard checks to documented usability. Label inferred regression invariants and hypotheses explicitly for developer review.\n${JSON.stringify({ input: session.input, context: session.context })}`,
   });
   validateSchema(result, planSchema);
   const plan = result as {
@@ -216,7 +219,7 @@ export async function analyse(
     gaps: string[];
     scenarios: Omit<Scenario, "id" | "status" | "reason">[];
   };
-  if (!plan.scenarios.length) {
+  if (!plan.scenarios.length && isDeep(session)) {
     throw new Error("AI produced no QA scenarios.");
   }
   for (const item of plan.scenarios) {
@@ -266,12 +269,13 @@ export async function explore(
 ): Promise<void> {
   const dir = join(session.dir, "exploration-" + Date.now());
   const approved = session.scenarios.filter(
-    (item) => item.status === "approved",
+    scenarioSelected,
   );
-  const ux = await readFile(
+  if (!approved.length) { return; }
+  const ux = isDeep(session) ? await readFile(
     join(dirname(dirname(session.dir)), "roles", "ui-ux-tester.md"),
     "utf8",
-  );
+  ) : "Cover only the selected changed behavior and relevant regression; no broad UX expansion.";
   try {
     const result = await invokeCodex({
       ...aiOptions(session, signal, progress),
@@ -279,7 +283,7 @@ export async function explore(
       role: "browser-debugger",
       schema: explorationSchema,
       browser: { url: session.input.url, headless: session.input.headless },
-      prompt: `Navigate to ${session.input.url} and exercise ONLY these approved flows on their affected UI surface. Do not click or keyboard through unrelated cards, modals, links, or external destinations unless an approved scenario explicitly names them. For external links, inspect the current-page href, label, focus, and target semantics instead of navigating away unless navigation is the explicit behavior under test. Return one flow per scenario ID. Unit-only scenarios will be verified later by their detected runner, so browser-only tool access is not itself a permanent gap. Record exact inputs, observed outcomes, selectors at the state where used, screenshots of successes and failures, console/network evidence. Expected behavior stays defined by criteria; if actual behavior differs retain the original expectation. Use prepared repeatable data, do not authenticate. Save screenshots with auto-generated names.\nSCOPED UX GUIDANCE: ${ux}\n${JSON.stringify({ approved, intent: session.input.intent, criteria: session.input.criteria, changedPaths: session.context?.changes.map((change) => change.path) ?? [], developerFeedback: session.feedback })}`,
+      prompt: `Navigate to ${session.input.url} and exercise ONLY these approved flows on their affected UI surface. Never click, activate, open, or navigate to outbound or external links. Inspect external links in the current page only, including their href, label, focus, target, and rel semantics. Return one flow per scenario ID. ${isDeep(session) ? "Unit-only scenarios will be verified later by their detected runner, so browser-only tool access is not itself a permanent gap." : "Record non-browser-verifiable acceptance behavior as a limitation and suggest --deep; do not invent browser flows. Do not list intentional unit/integration skips or unchanged helpers as gaps. Use gaps: [] if all selected scenarios were observed."} Record exact inputs, observed outcomes, selectors at the state where used, screenshots of successes and failures, console/network evidence. Expected behavior stays defined by criteria; if actual behavior differs retain the original expectation. Use prepared repeatable data, do not authenticate. Save screenshots with auto-generated names.\nSCOPED UX GUIDANCE: ${ux}\n${JSON.stringify({ approved, intent: session.input.intent, criteria: session.input.criteria, changedPaths: session.context?.changes.map((change) => change.path) ?? [], developerFeedback: session.feedback })}`,
     });
     validateSchema(result, explorationSchema);
     const value = result as { flows: Exploration[]; gaps: string[] };
@@ -336,11 +340,14 @@ export function validateTests(
     gaps: string[];
   };
   if (!response.tests.length) {
-    throw new Error("No tests generated.");
+    throw new Error(isDeep(session) ? "No tests generated." : "No browser tests generated. Browser-verifiable coverage is incomplete; use --deep for existing-runner unit/integration coverage.");
   }
   const ids = new Set<string>();
   const paths = new Set<string>();
   const tests = response.tests.map((item) => {
+    if (!isDeep(session) && (item.kind === "unit" || item.kind === "integration" || item.runner !== "playwright")) {
+      throw new Error("Standard review supports browser tests only; use --deep for unit/integration coverage.");
+    }
     safeRelative(item.path);
     if (session.context?.tree.includes(item.path)) {
       throw new Error(
@@ -374,7 +381,7 @@ export function validateTests(
           (id) =>
             !session.scenarios.some(
               (scenario) =>
-                scenario.id === id && scenario.status === "approved",
+                scenario.id === id && scenarioSelected(scenario),
             ),
         ))
     ) {
@@ -460,7 +467,7 @@ export async function generate(
     dir: join(dir, "generation"),
     role: "test-automator",
     schema: testsSchema,
-    prompt: `The tool supplies its own Playwright runner/config/dependency; target-repo browser setup is unnecessary. Report only missing approved coverage or prerequisites, not routine pending execution. Generate ordinary reviewable test files for ALL approved scenarios, without a fixed test-count ceiling. Unit-only scenarios must be covered through their existing runner; do not invent browser flows for them. Browser tests import {test,expect} from '@playwright/test', navigate to ${session.input.url}, use semantic locators observed at the correct state, and assert developer expected behavior. Each file should isolate one scenario so selection/coverage is clear. Dynamic dialog and post-navigation locators are valid. Unit/integration tests use ONLY detected existing runners and conventions and import source via relative paths at the proposed destination. All generated destinations must be NEW paths absent from context.tree; do not copy or replace an existing test. Existing tests are executed separately as a baseline. Support files must be test-only, referenced by supportIds. No app source/configuration changes. Do not weaken expectations to match observed bugs. Report gaps for unobserved selectors, missing fixtures/services, or unsupported setups. Feedback produces a NEW revision.\n${JSON.stringify({ input: session.input, context: session.context, scenarios: session.scenarios, exploration: session.explorations, previous: session.revisions.at(-1)?.tests, developerFeedback: session.feedback, feedback })}`,
+    prompt: `${isDeep(session) ? "Generate browser and existing-runner unit/integration coverage as appropriate." : "Generate ONLY browser tests and their Playwright support files. Unit/integration generation and existing baselines are skipped at standard depth; record a limitation and suggest --deep if acceptance behavior cannot be verified in a browser. Intentionally skipped unit/integration generation and existing baselines are NOT gaps: the tool reports skipped modules separately. Unchanged source helpers and existing tests are supporting context, not extra acceptance scope. Include gaps ONLY for selected acceptance criteria that cannot be tested or actual missing prerequisites, otherwise return gaps: []. These scope instructions override any broader guidance below."}\nThe tool supplies its own Playwright runner/config/dependency; target-repo browser setup is unnecessary. Report only missing approved coverage or prerequisites, not routine pending execution. Generate ordinary reviewable test files for ALL approved scenarios, without a fixed test-count ceiling. ${isDeep(session) ? "Unit-only scenarios must be covered through their existing runner; do not invent browser flows for them." : "Only browser-verifiable behavior is in execution scope; preserve uncovered criteria as gaps."} Never generate a test that clicks, activates, opens, or navigates to an outbound or external link. Test external-link behavior from the localhost page only by inspecting attributes and activation semantics such as href, target, and rel. Browser tests import {test,expect} from '@playwright/test', navigate to ${session.input.url}, use semantic locators observed at the correct state, and assert developer expected behavior. Each file should isolate one scenario so selection/coverage is clear. Dynamic dialog and post-navigation locators are valid for the localhost application only. ${isDeep(session) ? "Unit/integration tests use ONLY detected existing runners and conventions and import source via relative paths at the proposed destination." : "Do not generate unit/integration tests."} All generated destinations must be NEW paths absent from context.tree; do not copy or replace an existing test. ${isDeep(session) ? "Existing tests are executed separately as a baseline." : "Existing runner baselines are skipped."} Support files must be test-only, referenced by supportIds. No app source/configuration changes. Do not weaken expectations to match observed bugs. Report gaps for unobserved selectors, missing fixtures/services, or unsupported setups. Feedback produces a NEW revision.\n${JSON.stringify({ input: session.input, context: session.context, scenarios: session.scenarios, exploration: session.explorations, previous: session.revisions.at(-1)?.tests, developerFeedback: session.feedback, feedback })}`,
   });
   const generated = validateTests(result, session);
   await mkdir(join(dir, "tests"), { recursive: true, mode: 0o700 });
