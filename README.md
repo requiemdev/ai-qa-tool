@@ -2,9 +2,11 @@
 
 Interactive local pre-merge QA for JavaScript/TypeScript projects:
 
-**Describe branch → analyse changes → review scenarios → explore in Chromium → generate/review tests → execute → classify findings → export selected tests.**
+**Select repo → enter URL and intent → analyse/explore → generate tests → approve and run → report.**
 
-Codex uses your local ChatGPT sign-in for sequential QA planning, browser exploration through Playwright MCP, test generation, and independent review. Repeatable browser tests run through Playwright Test. Existing Vitest, Jest, and Node test setups can provide unit/integration coverage.
+The default requires four responses: repository path, localhost URL, intent, and execution approval. Supply the first three as flags to leave only execution approval.
+
+Codex uses your local ChatGPT sign-in for sequential QA planning, browser exploration through Playwright MCP, test generation, in three AI stages. Repeatable browser tests run through Playwright Test. `--deep` adds detailed scenario review, existing-runner unit/integration coverage, independent AI test review, and finding assessment/classification.
 
 ## Install
 
@@ -18,7 +20,7 @@ npm run build
 npm run qa
 ```
 
-Start your app yourself and prepare repeatable development/test data before checking it. The workflow asks you to confirm that the supplied localhost server matches the selected source revision and that backend state is repeatable/resettable. Browser profiles and fresh test contexts isolate browser data; they do not reset backend state or isolate the operating system. Authentication flows are outside the guided workflow's scope.
+Start your app yourself and prepare repeatable development/test data before checking it. The default displays and records assumed prerequisites: the supplied localhost server represents the selected source and development data is repeatable/resettable. Deep sessions ask for developer confirmation. Browser profiles and fresh test contexts isolate browser data; they do not reset backend state or isolate the operating system. Authentication flows are outside the guided workflow's scope.
 
 ## Guided check
 
@@ -33,32 +35,38 @@ npm run qa -- check --repo /path/to/app --base main \
   --change-type feature
 ```
 
-Flags prefill the corresponding prompts. Available flags:
+Supplied flags bypass their prompts. Intent becomes AC1 unless explicit criteria are supplied; change type defaults to feature. Available flags:
 
 | Flag | Meaning |
 | --- | --- |
-| `--repo <path>` | Repository to inspect. |
+| `--repo <path>` | Required repository selection; prompted when missing, with no current-directory fallback. |
 | `--base <ref>` | Base branch/ref; no automatic fetch. |
 | `--url <URL>` | HTTP(S) loopback URL without embedded credentials. |
 | `--intent <text>` | Feature or bug-fix description. |
-| `--criteria <text>` | Repeatable acceptance criteria; interactive entry uses `\|` separators. |
+| `--criteria <text>` | Repeatable explicit acceptance criteria; overrides the default 1–3 browser scenario target. |
 | `--change-type feature\|bug-fix` | Type of change. |
-| `--include-local` | Explicitly include tracked local edits and eligible untracked source. |
+| `--include-local` | Compatible explicit selection of local work, included by default. |
+| `--committed-only` | Exclude staged, unstaged, and untracked work; conflicts with `--include-local`. |
+| `--deep` | Detailed scenario review, existing-runner unit/integration tests, independent review, and finding classification. |
 | `--context <file>` | Repeatable supporting context from the selected revision. |
 | `--timeout <milliseconds>` | Per AI stage/test group limit, default 600000; range 1000–3600000. |
-| `--model <name>` | Explicit Codex model override for guided stages; default is `gpt-5.6-luna` with `xhigh` reasoning. |
+| `--model <name>` | Explicit Codex model override for guided stages; default is `gpt-5.6-luna` with `medium` reasoning (`xhigh` for deep sessions). |
 | `--headless` | Hide exploration Chromium; default is visible. Replay remains headless. |
 | `--session <id>` | Reopen a saved session. |
 
-The base defaults to the recorded `origin/HEAD` when available. Otherwise the CLI offers local/remote `main` and `master` refs; ambiguous candidates require a selection.
+The checked-out target branch is reviewed without switching branches. Comparison uses the merge base with the first available reference: explicit `--base`, recorded `origin/HEAD`, `main`, `origin/main`, `master`, `origin/master`. Only an absence of references requires a prompt. No reviewable changes produces an actionable error; scope is never silently replaced.
 
-The branch summary shows base/head/merge-base SHAs, commit subjects/bodies, changed paths, detected runners, omitted context, and the AI analysis. Commit/intent conflicts require recorded developer clarification.
+The branch summary labels the target branch and comparison reference separately and shows head/merge-base SHAs, commit subjects/bodies, changed paths, detected runners, omitted context, and the AI analysis. Commit/intent conflicts require recorded developer clarification.
 
-Review scenarios with `approve`, `edit`, `add`, or `exclude`. Exclusion requires a reason. Scenarios map to stable acceptance IDs such as `AC1` and stable scenario IDs such as `S1`. Exploration exercises only approved flows, using snapshots at each state, including dialogs, navigation, and dynamically rendered controls. Progress prints browser tool activity; successful and failed interactions retain screenshots and action evidence.
+By default the displayed plan automatically selects scenarios, separately from developer approval. It targets 1–3 browser scenarios around changed behavior and the most relevant regression, with explicit criteria overriding that target. Changes without browser-verifiable behavior are reported as a limitation with a suggestion to use `--deep`.
 
-Review generated tests with `source`, `edit`, `regenerate`, `approve`, or `reject`. Enter test IDs to approve a subset, or explicitly enter `all`. Required support files are included in that approval. Edits use `VISUAL` or `EDITOR`; configure an editor that waits for completion, for example `EDITOR='code --wait'`. Without an editor, the CLI prints a new revision path for you to edit and save. Every edit or regeneration creates a new retained revision, followed by independent review. Files changed after approval block execution.
+With `--deep`, review scenarios with `approve`, `edit`, `add`, or `exclude`. Exclusion requires a reason. Scenarios map to stable acceptance IDs such as `AC1` and stable scenario IDs such as `S1`. Exploration exercises only approved flows, using snapshots at each state, including dialogs, navigation, and dynamically rendered controls. Progress prints browser tool activity; successful and failed interactions retain screenshots and action evidence.
 
-Results retain original observations. Classify each finding as `bug`, `intended`, `invalid`, or `unresolved`, with a reason. Classification adds feedback and never changes the executed files or erases a failed run. `revise-tests`, `revise-plan`, and `rerun` require another review/approval. Reported gaps can be explicitly excluded from accepted scope with a recorded reason; uncovered approved scenarios still prevent a passing outcome.
+The default displays scope, assumed prerequisites, complete generated source, hashes, and required support before one prompt: **Run all / inspect / edit / regenerate / cancel**. `Run all` approves the exact displayed files and execution, then runs immediately. Results and reports are saved automatically; there are no mandatory classification, gap-exclusion, finish, or export prompts. Failed checks and incomplete selected coverage cannot become passing.
+
+With `--deep`, review generated tests with `source`, `edit`, `regenerate`, `approve`, or `reject`. Enter test IDs to approve a subset, or explicitly enter `all`. Required support files are included in that approval. Edits use `VISUAL` or `EDITOR`; configure an editor that waits for completion, for example `EDITOR='code --wait'`. Without an editor, the CLI prints a new revision path for you to edit and save. Every edit or regeneration creates a new retained revision, requiring fresh approval; deep sessions also perform independent review. Files changed after approval block execution.
+
+Deep results retain original observations. Classify each finding as `bug`, `intended`, `invalid`, or `unresolved`, with a reason. Classification adds feedback and never changes the executed files or erases a failed run. `revise-tests`, `revise-plan`, and `rerun` require another review/approval. Reported gaps can be explicitly excluded from accepted scope with a recorded reason; uncovered approved scenarios still prevent a passing outcome.
 
 ## Reopen and export
 
@@ -67,19 +75,19 @@ npm run qa -- review --session session-2026-10-04T08-00-00-000Z-example --timeou
 npm run qa -- export --session session-2026-10-04T08-00-00-000Z-example
 ```
 
-Use the actual printed session ID. `review` resumes the saved stage; pass `--timeout` to override its saved per-stage limit. Completed sessions reopen result review. Enter `cancel`/`quit`, press Ctrl-C, or close input to retain partial results. An interrupted execution is not automatically trusted as passing; resuming requires explicit execution confirmation. A timed-out exploration retains logs/evidence and records incomplete scenarios. Reopening continues with the saved source selection; start a new session to select another revision.
+Use the actual printed session ID. `review` resumes the saved stage; pass `--timeout` to override its saved per-stage limit. `review --session` offers optional result follow-up, including revisions and reruns. Legacy sessions retain their detailed behavior and saved source scope; new sessions persist depth and local selection. Enter `cancel`/`quit`, press Ctrl-C, or close input to retain partial results. An interrupted execution is not automatically trusted as passing; resuming requires explicit execution confirmation. A timed-out exploration retains logs/evidence and records incomplete scenarios. Reopening continues with the saved source selection; start a new session to select another revision.
 
 Export explicitly selected approved tests and their required test-only support. The CLI shows destinations and file contents/diffs before asking for approval. Existing destinations require another path. Exclusive creation prevents overwriting a file that appears during export. If you relocate files, keep relative imports valid. Export never commits or merges anything.
 
 ## Source and execution boundaries
 
-The guided workflow defaults to **committed HEAD versus merge base**. It reads source, imports, tests, HTML/CSS, and runner configuration from HEAD rather than the working tree. Opting into local edits freezes the selected local source for later runner execution. Known secret/environment files, generated output, dependencies, binary data, unsafe paths, and symlinks are excluded from model context. The 100000-byte context limit remains; reports list omitted files and gaps. Review source before submission: filename exclusions cannot detect secrets embedded in ordinary source.
+The guided workflow defaults to **the checked-out branch plus staged edits, unstaged edits, and eligible untracked source versus the merge base**. The existing snapshot mechanism freezes selected local source for later execution. `--committed-only` reads committed HEAD and excludes local work. Known secret/environment files, generated output, dependencies, binary data, unsafe paths, and symlinks are excluded from model context. The 100000-byte context limit remains; reports list omitted files and gaps. Review source before submission: filename exclusions cannot detect secrets embedded in ordinary source.
 
 Unit/integration execution extracts a disposable Git source snapshot matching the selected revision. Installed dependencies are reused only when dependency declarations and lockfiles match. Packages are linked individually so ordinary runner caches remain in the snapshot. Existing tests run before generated tests/support files are added, making pre-existing failures distinguishable. Missing dependencies, compiled output, fixtures, services, unsupported symlinks, or incompatible runner setups block execution. The CLI does not install application dependencies or guess build/server commands. Complex monorepo/build-specific setups may require adapting reviewed tests or preparing their prerequisites.
 
 Browser replay uses the tool's own configuration, fresh contexts, Chromium, one worker, no retries, and screenshots/traces for successful and failed tests. Specs are ordinary Playwright files with semantic locators and behavior assertions. The guided workflow has no fixed three-test ceiling. Browser-only and unit-only coverage are accounted for separately. Generated skipped/focused/expected-failure checks are rejected.
 
-AI stages use `gpt-5.6-luna` with `xhigh` reasoning by default, an empty workspace, a read-only Codex shell sandbox, disabled shell tools, and a per-invocation browser-tool allowlist. Global Codex settings are not changed. Arbitrary browser code evaluation is omitted from that allowlist. The configured browser origin reduces accidental external navigation but is not an OS security boundary. App source, diffs, intent, browser snapshots, and selected evidence go to the Codex model service using your existing sign-in. Credentials are not read or stored by this tool; inherited API-key environment variables are removed. Generated tests execute as **trusted reviewed local code** with your local user permissions.
+AI stages use `gpt-5.6-luna` with `medium` reasoning by default (`xhigh` for deep sessions), an empty workspace, a read-only Codex shell sandbox, disabled shell tools, and a per-invocation browser-tool allowlist. Global Codex settings are not changed. Arbitrary browser code evaluation is omitted from that allowlist. The configured browser origin reduces accidental external navigation but is not an OS security boundary. App source, diffs, intent, browser snapshots, and selected evidence go to the Codex model service using your existing sign-in. Credentials are not read or stored by this tool; inherited API-key environment variables are removed. Generated tests execute as **trusted reviewed local code** with your local user permissions.
 
 ## Reports and checks
 
@@ -97,7 +105,8 @@ npm test                     # Git selection, contracts, review/cancel, export, 
 # Fixture-only dependencies, installed under ignored artifacts:
 npm install --prefix .agent-qa/fixture-dependencies --ignore-scripts vitest@4.1.0 jest@30.2.0
 npm run test:runners          # Node/Vitest/Jest baselines, generation replay and regression
-npm run test:live             # Real Codex planning, MCP exploration, reviewed replay and export
+npm run test:live             # Real fluid flow, prompt/stage/time metrics, replay and regression
+AGENT_QA_DEEP=1 npm run test:live # Optional deep workflow and export
 AGENT_QA_LIVE=1 npm run test:runners  # Also generate runner fixtures through signed-in Codex
 npx playwright show-trace /absolute/path/to/trace.zip
 ```

@@ -26,6 +26,7 @@ import { randomUUID } from "node:crypto";
 import { safeRelative } from "./branch.js";
 import {
   feedback,
+  isDeep,
   saveSession,
   sha256,
   containedPath,
@@ -462,9 +463,9 @@ export async function reviewTests(
           (item) =>
             `${item.id} ${item.kind}/${item.runner} ${item.path} (${item.scenarioIds.join(", ")})\n  Purpose: ${item.purpose}\n  Expect: ${item.expected}\n  SHA256: ${item.sha256}`,
         )
-        .join("\n")}\n\nIndependent review:\n${revision.review}`,
+        .join("\n")}${isDeep(session) ? "\n\nIndependent review:\n" + revision.review : "\n\nIndependent AI review skipped (standard depth)."}`,
     );
-    if (session.context) {
+    if (isDeep(session) && session.context) {
       ui.show(
         "Existing baseline files to execute before generated unit/integration tests:\n" +
           session.context.runners
@@ -475,11 +476,16 @@ export async function reviewTests(
             .join("\n"),
       );
     }
-    const action = await ui.ask(
-      "Tests: source / edit / regenerate / approve / reject",
-      "source",
-    );
-    if (action === "source") {
+    if (!isDeep(session)) {
+      ui.show(`Scope: ${session.input.intent}\n${session.input.criteria.map((text, i) => `AC${i + 1}: ${text}`).join("\n")}\nComparison reference: ${session.input.base}; target branch: ${session.context?.branch || "(detached/pending)"}; local work: ${session.input.local ? "included" : "excluded"}.\nPrerequisites (${session.assumptions.basis ?? "assumed"}): matching server and repeatable development data. Required support is included in Run all.`);
+      for (const item of revision.tests) { ui.show(`--- ${item.path} ---\n${item.content}`); }
+    }
+    const action = (await ui.ask(
+      isDeep(session) ? "Tests: source / edit / regenerate / approve / reject" : "Run all / inspect / edit / regenerate / cancel (approves displayed files, required support, and execution as trusted local code)",
+      isDeep(session) ? "source" : "",
+    )).toLowerCase();
+    if (action === "cancel") { throw new Error("Cancelled."); }
+    if (action === "source" || action === "inspect") {
       const id = await ui.required("Test ID (or all)", "all");
       for (const item of revision.tests.filter(
         (item) => id === "all" || item.id === id,
@@ -502,10 +508,10 @@ export async function reviewTests(
       feedback(session, "tests", "rejected", await ui.required("Reason"));
       await saveSession(session);
       return "regenerate";
-    } else if (action === "approve") {
-      const selected = await ui.required(
+    } else if ((action === "approve" && isDeep(session)) || (action === "run all" && !isDeep(session))) {
+      const selected = isDeep(session) ? await ui.required(
         "IDs to approve (comma-separated, or all)",
-      );
+      ) : "all";
       const ids =
         selected === "all"
           ? revision.tests
@@ -528,7 +534,7 @@ export async function reviewTests(
         "Selected exact files:\n" + tests.map((item) => item.path).join("\n"),
       );
       if (
-        !(await ui.confirm(
+        isDeep(session) && !(await ui.confirm(
           "Approve these files, required support, and execution as trusted local code",
         ))
       ) {
@@ -560,6 +566,7 @@ export async function reviewTests(
 export async function reviewFindings(
   session: Session,
   ui: Terminal,
+  classify = true,
 ): Promise<void> {
   ui.section("Results");
   for (const item of session.executions) {
@@ -574,7 +581,7 @@ export async function reviewFindings(
     ui.show(
       `${pc.bold(pc.red("Finding " + finding.id))}: ${pc.bold(finding.category)}\n${finding.observed}\nEvidence: ${finding.evidence.join(", ")}\nSuspected cause: ${finding.suspectedCause || "Unknown"}\nSuggested fix: ${finding.suggestedFix || "Inspect evidence"}`,
     );
-    if (session.feedback.some((item) => item.targetId === finding.id)) {
+    if (!classify || session.feedback.some((item) => item.targetId === finding.id)) {
       continue;
     }
     let decision: string;

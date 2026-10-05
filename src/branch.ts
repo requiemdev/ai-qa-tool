@@ -54,6 +54,7 @@ export type Runner = {
 export type BranchContext = Context & {
   /** Commit SHA of the branch HEAD. */
   head: string;
+  localChanges?: Context["changes"];
   /** Name or ref of the target base branch. */
   base: string;
   /** Common ancestor commit SHA between base and HEAD. */
@@ -89,20 +90,18 @@ export async function baseCandidates(repo: string): Promise<string[]> {
     "--quiet",
     "refs/remotes/origin/HEAD",
   ]).catch(() => "");
-  if (remote.trim()) {
-    return [remote.trim().replace(/^refs\/remotes\//, "")];
+  const candidates = [
+    remote.trim().replace(/^refs\/remotes\//, ""),
+    "main", "origin/main", "master", "origin/master",
+  ].filter(Boolean);
+  const available: string[] = [];
+  for (const ref of [...new Set(candidates)]) {
+    if (await git(repo, ["rev-parse", "--verify", `${ref}^{commit}`])
+      .then(() => true).catch(() => false)) {
+      available.push(ref);
+    }
   }
-  const refs = (
-    await git(repo, [
-      "for-each-ref",
-      "--format=%(refname:short)",
-      "refs/heads",
-      "refs/remotes",
-    ])
-  )
-    .trim()
-    .split("\n");
-  return refs.filter((ref) => /(?:^|\/)(main|master)$/.test(ref));
+  return available;
 }
 
 /**
@@ -241,7 +240,10 @@ export async function collectBranch(options: {
     await git(repo, ["rev-parse", "--verify", `${options.base}^{commit}`])
   ).trim();
   const mergeBase = (await git(repo, ["merge-base", head, base])).trim();
-  const local = options.local ?? false;
+  const local = options.local ?? true;
+  const localChanges = parseChanges(await git(repo, [
+    "diff", "--no-ext-diff", "--no-textconv", "--name-status", "-z", "-M", head, "--",
+  ]));
   const diffArgs = [
     "diff",
     "--no-ext-diff",
@@ -356,9 +358,14 @@ export async function collectBranch(options: {
   if (local) {
     for (const path of untracked) {
       if (eligible.test(path)) {
-        await add(path, "Opt-in untracked local source.");
+        await add(path, "Untracked local source.");
+      } else {
+        skipped.push(path);
       }
     }
+  }
+  if (!files.some(file => changes.some(change => change.path === file.path) || (local && untracked.includes(file.path)))) {
+    throw new Error(`No reviewable changes against ${options.base}. Check the comparison reference${local ? " or add eligible source changes" : " or omit --committed-only to include local work"}. Excluded files: ${skipped.join(", ") || "none"}.`);
   }
   for (const path of options.context ?? []) {
     await add(
@@ -446,6 +453,7 @@ export async function collectBranch(options: {
     branch: (await git(repo, ["branch", "--show-current"])).trim(),
     local,
     changes,
+    localChanges,
     untracked,
     skipped,
     imported,
@@ -523,18 +531,24 @@ export async function createSnapshot(
       if (change.status.startsWith("D")) {
         await unlink(destination).catch(() => {});
       } else if (!excluded.test(change.path)) {
-        await mkdir(dirname(destination), { recursive: true });
-        await writeFile(
-          destination,
-          await safeContent(context.repo, change.path),
-        );
+        const content = await safeContent(context.repo, change.path).catch(() => undefined);
+        if (content !== undefined) {
+          await mkdir(dirname(destination), { recursive: true });
+          await writeFile(destination, content);
+        } else {
+          // Excluded local source must not fall back to stale committed content.
+          await unlink(destination).catch(() => {});
+        }
       }
     }
     for (const path of context.untracked) {
       if (eligible.test(path) && !excluded.test(path)) {
         const destination = join(snapshot, safeRelative(path));
-        await mkdir(dirname(destination), { recursive: true });
-        await writeFile(destination, await safeContent(context.repo, path));
+        const content = await safeContent(context.repo, path).catch(() => undefined);
+        if (content !== undefined) {
+          await mkdir(dirname(destination), { recursive: true });
+          await writeFile(destination, content);
+        }
       }
     }
   }

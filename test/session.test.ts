@@ -7,6 +7,8 @@ import {
   rm,
   mkdir,
   symlink,
+  chmod,
+  readdir,
 } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -29,7 +31,7 @@ import {
   containedPath,
 } from "../src/session.js";
 import { validateSchema, planSchema, validateTests } from "../src/stages.js";
-import { resultStatus, selectSupport, fileStatus } from "../src/execution.js";
+import { executeRevision, resultStatus, selectSupport, fileStatus } from "../src/execution.js";
 import {
   reviewScenarios,
   reviewTests,
@@ -53,6 +55,7 @@ const input = {
 };
 class ScriptedTerminal extends Terminal {
   output: string[] = [];
+  prompts: string[] = [];
   constructor(private answers: string[]) {
     super(new PassThrough());
   }
@@ -60,6 +63,7 @@ class ScriptedTerminal extends Terminal {
     this.output.push(text);
   }
   override async ask(_text: string, fallback = ""): Promise<string> {
+    this.prompts.push(_text);
     const value = this.answers.shift();
     if (value === undefined) {
       throw new Error("Scripted input exhausted.");
@@ -94,7 +98,7 @@ const generated = {
   supportIds: [],
 };
 
-test("committed branch selection excludes dirty imports and includes HTML/config/renames/deletes; ambiguous bases require a choice", async () => {
+test("committed branch selection excludes dirty imports and includes HTML/config/renames/deletes; bases use priority order", async () => {
   const repo = await mkdtemp(join(tmpdir(), "qa-branch-"));
   const git = (...args: string[]) =>
     execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
@@ -111,6 +115,7 @@ test("committed branch selection excludes dirty imports and includes HTML/config
     await writeFile(join(repo, "styles.css"), "body { color: black }");
     await writeFile(join(repo, "rename.ts"), "export const rename = true;\n");
     await writeFile(join(repo, "delete.ts"), "export const gone = true;\n");
+    await writeFile(join(repo, "binary.ts"), "export const initiallyText = true;\n");
     await writeFile(
       join(repo, "package.json"),
       JSON.stringify({ scripts: { test: "node --test" } }),
@@ -144,7 +149,7 @@ test("committed branch selection excludes dirty imports and includes HTML/config
     await writeFile(join(repo, ".env"), "SECRET=must-not-submit");
     const before = git("status", "--porcelain");
     assert.deepEqual(await baseCandidates(repo), ["main", "master"]);
-    const branch = await collectBranch({ repo, base: "main" });
+    const branch = await collectBranch({ repo, base: "main", local: false });
     assert.match(
       branch.files.find((file) => file.path === "App.ts")!.content,
       /feature = value/,
@@ -183,7 +188,21 @@ test("committed branch selection excludes dirty imports and includes HTML/config
     assert.match(await readFile(join(repo, "value.ts"), "utf8"), /value = 999/);
     assert.equal(git("status", "--porcelain"), before);
     await rm(scratch, { recursive: true, force: true });
-    const local = await collectBranch({ repo, base: "main", local: true });
+    await writeFile(join(repo, "binary.ts"), Buffer.from([0, 1, 2]));
+    await symlink("/etc/passwd", join(repo, "linked.ts"));
+    await writeFile(join(repo, "staged.ts"), "export const staged = true;\n");
+    git("add", "staged.ts");
+    const local = await collectBranch({ repo, base: "main" });
+    assert(local.files.some(file => file.path === "staged.ts"));
+    assert(local.files.some(file => file.path === "page.html"));
+    assert(local.localChanges?.some(change => change.path === "App.ts"));
+    const committedOnly = await collectBranch({ repo, base: "main", local: false });
+    assert(!committedOnly.files.some(file => file.path === "staged.ts" || file.path === "untracked.ts"));
+    assert.match(committedOnly.files.find(file => file.path === "App.ts")!.content, /feature = value/);
+    assert(local.skipped.includes(".env"));
+    assert(local.skipped.some(path => path.startsWith("binary.ts")));
+    assert(local.skipped.some(path => path.startsWith("linked.ts")));
+    assert.equal(local.local, true);
     assert(local.files.some((file) => file.path === "untracked.ts"));
     assert.match(
       local.files.find((file) => file.path === "App.ts")!.content,
@@ -195,11 +214,14 @@ test("committed branch selection excludes dirty imports and includes HTML/config
       await writeFile(join(repo, "App.ts"), "export const LATER = true;");
       const cloned = await createSnapshot(local, join(frozenDir, "run"));
       assert.match(await readFile(join(cloned, "App.ts"), "utf8"), /DIRTY/);
+      await assert.rejects(readFile(join(cloned, "binary.ts")), /ENOENT/);
     } finally {
       await rm(frozenDir, { recursive: true, force: true });
     }
     git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
-    assert.deepEqual(await baseCandidates(repo), ["origin/main"]);
+    assert.deepEqual(await baseCandidates(repo), ["main", "master"]);
+    git("update-ref", "refs/remotes/origin/main", git("rev-parse", "main"));
+    assert.deepEqual(await baseCandidates(repo), ["origin/main", "main", "master"]);
     await assert.rejects(collectBranch({ repo, base: "--bad" }), /valid base/);
     await assert.rejects(
       collectBranch({ repo, base: "main", context: [".env"] }),
@@ -550,7 +572,7 @@ test("export requires selected approved files, includes support, previews collis
 });
 
 test("editor changes create a new unapproved revision while originals remain immutable", async () => {
-  const session = await newSession(input);
+  const session = await newSession({ ...input, depth: "standard" });
   const savedEditor = process.env.EDITOR;
   const savedVisual = process.env.VISUAL;
   try {
@@ -602,6 +624,160 @@ test("editor changes create a new unapproved revision while originals remain imm
     } else {
       process.env.VISUAL = savedVisual;
     }
+    await rm(session.dir, { recursive: true, force: true });
+  }
+});
+
+class WorkflowTerminal extends ScriptedTerminal {
+  stages: string[] = [];
+  override async working<T>(label: string, task: (progress: (text: string) => void) => Promise<T>): Promise<T> {
+    this.stages.push(label);
+    // Exercise workflow transitions without starting a browser in terminal checks.
+    if (label === "Executing approved tests") { return undefined as T; }
+    return task(() => {});
+  }
+}
+
+test("fluid workflow requires explicit repo, bypasses supplied flags, asks four/default or one/flags responses, and retains deep review", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "qa-fluid-"));
+  const oldPath = process.env.PATH;
+  const sessions: string[] = [];
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+  try {
+    git("init", "-q", "-b", "main");
+    git("config", "user.name", "Fixture");
+    git("config", "user.email", "fixture@example.test");
+    await writeFile(join(repo, "index.html"), "<h1>Before</h1>");
+    git("add", "."); git("commit", "-qm", "baseline");
+    git("checkout", "-qb", "feature");
+    await writeFile(join(repo, "index.html"), "<h1>After</h1>");
+    git("add", "."); git("commit", "-qm", "Show After");
+    const bin = join(repo, "fixture-bin");
+    await mkdir(bin);
+    const fakeCodex = join(bin, "codex");
+    await writeFile(fakeCodex, `#!${process.execPath}
+import {readFileSync,writeFileSync} from 'node:fs';
+const args = process.argv.slice(2);
+const schema = JSON.parse(readFileSync(args[args.indexOf('--output-schema') + 1], 'utf8'));
+const prompt = readFileSync(0, 'utf8');
+const scenario = {title:'Show After',criteria:['AC1'],kind:'normal',steps:['Open page'],expected:'After appears'};
+const test = ${JSON.stringify({ ...generated, content: "import {test,expect} from '@playwright/test'; test('After', async ({page}) => { await page.goto('http://127.0.0.1:3000/'); await expect(page.getByRole('heading')).toHaveText('After'); });" })};
+let result;
+if (schema.properties.scenarios) result = {summary:'Changed heading',conflicts:[],gaps:[],scenarios:prompt.includes('unit-only fixture') ? [] : [scenario]};
+else if (schema.properties.flows) result = {flows:[{scenarioId:'S1',status:'observed',steps:['Open page'],observed:'After appears; getByRole heading observed',evidence:[]}],gaps:[]};
+else if (schema.properties.tests) result = {tests:[test],gaps:[]};
+else result = {assessment:'Reviewed assertions',issues:[],gaps:[]};
+writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(result));
+`);
+    await chmod(fakeCodex, 0o700);
+    process.env.PATH = bin + ":" + oldPath;
+    const required = new WorkflowTerminal(["cancel"]);
+    await assert.rejects(check({ url: input.url, intent: input.intent }, required), /Cancelled/);
+    assert.deepEqual(required.prompts, ["Repository path"]);
+    const invalid = new WorkflowTerminal([]);
+    await assert.rejects(check({ repo: bin, committedOnly: true, local: true }, invalid), /cannot be combined/);
+    await assert.rejects(check({ repo: "/not-a-repo" }, new WorkflowTerminal([])), /Git inspection/);
+    const before = git("status", "--porcelain");
+    for (const withFlags of [false, true]) {
+      const ui = new WorkflowTerminal(withFlags ? ["run all"] : [repo, input.url, "Show After", "run all"]);
+      const session = await check(withFlags ? { repo, url: input.url, intent: "Show After", committedOnly: true } : {}, ui);
+      sessions.push(session.dir);
+      assert.equal(ui.prompts.length, withFlags ? 1 : 4, ui.prompts.join("\n"));
+      assert.match(ui.prompts.at(-1)!, /^Run all \/ inspect/);
+      assert.equal(session.input.depth, "standard");
+      assert.equal(session.input.local, !withFlags);
+      assert.deepEqual(session.input.criteria, ["Show After"]);
+      assert.equal(session.input.base, "main");
+      assert.equal(session.assumptions.basis, "assumed");
+      assert.equal(session.scenarios[0]!.status, "selected");
+      assert(session.feedback.some(item => item.decision === "automatically-selected"));
+      assert.equal(ui.stages.length, 4); // analysis, exploration, generation, execution
+      assert.equal(session.stage, "complete");
+      assert.equal(session.status, "blocked"); // intentionally no execution coverage
+      assert.equal(session.exports.length, 0);
+      assert(ui.output.some(text => text.startsWith("--- ")));
+      const analysisDir = (await readdir(session.dir)).find(name => name.startsWith("analysis-"))!;
+      const invocation = JSON.parse(await readFile(join(session.dir, analysisDir, "invocation.json"), "utf8"));
+      assert.equal(invocation.reasoningEffort, "medium");
+      const report = await readFile(join(session.dir, "report.md"), "utf8");
+      assert.match(report, /Review depth: standard/);
+      assert.match(report, /Prerequisites \(assumed\)/);
+      session.stage = "execute";
+      session.status = "cancelled";
+      await saveSession(session);
+      const resumedUi = new WorkflowTerminal(["cancel"]);
+      const resumed = await check({ session: session.id, deep: true, local: !session.input.local }, resumedUi);
+      assert.equal(resumed.status, "cancelled");
+      assert.equal(resumed.input.depth, "standard");
+      assert.equal(resumed.input.local, session.input.local);
+      assert.match(resumedUi.prompts[0]!, /^Run all/);
+      assert(!resumedUi.stages.includes("Executing approved tests"));
+      const file = session.revisions.at(-1)!.tests[0]!;
+      await writeFile(join(session.revisions.at(-1)!.dir, "tests", file.path), file.content + "// altered");
+      await assert.rejects(executeRevision(session, new AbortController().signal, () => {}), /Approved files changed/);
+      const changedUi = new WorkflowTerminal(["run all"]);
+      const changed = await check({ session: session.id }, changedUi);
+      assert.equal(changed.status, "blocked");
+      assert.match(changed.reason, /changed since review/);
+    }
+    const deepUi = new WorkflowTerminal(["yes", "yes", "approve", "source", "all", "approve", "all", "yes", "finish", "no"]);
+    const deep = await check({ repo, url: input.url, intent: "Show After", deep: true, local: false }, deepUi);
+    sessions.push(deep.dir);
+    assert.equal(deep.input.depth, "deep");
+    assert(deepUi.prompts.some(text => text.startsWith("Plan:")));
+    assert(deepUi.stages.includes("Independently reviewing generated assertions"));
+    assert.equal(deep.assumptions.basis, "developer-confirmed");
+    const deepAnalysis = (await readdir(deep.dir)).find(name => name.startsWith("analysis-"))!;
+    assert.equal(JSON.parse(await readFile(join(deep.dir, deepAnalysis, "invocation.json"), "utf8")).reasoningEffort, "xhigh");
+    assert.equal(deep.status, "blocked");
+    const limitedUi = new WorkflowTerminal([]);
+    const limited = await check({ repo, url: input.url, intent: "unit-only fixture", committedOnly: true }, limitedUi);
+    sessions.push(limited.dir);
+    assert.equal(limited.status, "blocked");
+    assert.match(limited.reason, /No browser-verifiable.*--deep/);
+    assert.equal(limitedUi.prompts.length, 0);
+    assert.equal(git("branch", "--show-current"), "feature");
+    assert.equal(git("status", "--porcelain"), before);
+    await assert.rejects(collectBranch({ repo, base: "HEAD", local: false }), /No reviewable changes/);
+    await writeFile(join(repo, "extra.ts"), "export const extra = true;");
+    assert((await collectBranch({ repo, base: "HEAD" })).files.some(file => file.path === "extra.ts"));
+    git("branch", "-D", "main");
+    assert.deepEqual(await baseCandidates(repo), []);
+    const missingBaseUi = new WorkflowTerminal(["HEAD", "cancel"]);
+    const missingBase = await check({repo, url: input.url, intent: "Show After", local: true}, missingBaseUi);
+    sessions.push(missingBase.dir);
+    assert.match(missingBaseUi.prompts[0]!, /^Comparison reference/);
+    assert.equal(missingBase.input.base, "HEAD");
+  } finally {
+    process.env.PATH = oldPath;
+    for (const dir of sessions) { await rm(dir, { recursive: true, force: true }); }
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("automatic reporting retains failed and incomplete selected coverage without mandatory classification", async () => {
+  const session = await newSession({ ...input, depth: "standard" });
+  try {
+    session.scenarios = [{ ...scenario, status: "selected" }];
+    session.explorations = [{ scenarioId: "S1", status: "observed", steps: [], observed: "Created Ada", evidence: [] }];
+    session.revisions = [{ number: 1, dir: session.dir, tests: validateTests({ tests: [generated], gaps: [] }, session).tests.map(item => ({ ...item, approved: true })), review: "", feedback: "" }];
+    const run = { id: "run-1", revision: 1, phase: "generated" as const, runner: "playwright", testIds: ["T1"], files: [], status: "passed" as const, artifacts: session.dir, reason: "", startedAt: new Date().toISOString() };
+    for (const expected of ["passed", "failed", "blocked"] as const) {
+      session.stage = "findings";
+      session.executions = [{ ...run, status: expected === "blocked" ? "passed" : expected }];
+      session.explorations[0]!.status = expected === "blocked" ? "incomplete" : "observed";
+      session.findings = expected === "failed" ? [{ id: "F1", executionId: run.id, scenarioIds: ["S1"], category: "observed-failure", observed: "Wrong confirmation", suspectedCause: "", suggestedFix: "", source: [], evidence: [] }] : [];
+      // A developer classification is retained as feedback, never erasing failed execution.
+      if (expected === "failed") { feedback(session, "F1", "intended", "Fixture classification"); }
+      await saveSession(session);
+      const ui = new WorkflowTerminal([]);
+      const result = await check({ session: session.id }, ui);
+      assert.equal(result.status, expected);
+      assert.equal(result.stage, "complete");
+      assert.equal(ui.prompts.length, 0);
+      assert.equal(result.findings.length, session.findings.length);
+    }
+  } finally {
     await rm(session.dir, { recursive: true, force: true });
   }
 });
