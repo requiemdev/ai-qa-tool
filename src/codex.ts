@@ -6,15 +6,14 @@
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { chromium } from "@playwright/test";
 import { command } from "./process.js";
 import { record } from "./contracts.js";
 import { MAX_CONTEXT_BYTES } from "./context.js";
+import { root } from "./session.js";
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const require = createRequire(import.meta.url);
 
 /**

@@ -43,6 +43,7 @@ import {
   generate,
   reviewRevision,
   validateSchema,
+  findingReviewSchema,
 } from "./stages.js";
 import { executeRevision } from "./execution.js";
 import { DEFAULT_TIMEOUT, invokeCodex } from "./codex.js";
@@ -224,27 +225,6 @@ async function assessFindings(session: Session, ui: Terminal): Promise<void> {
   if (!current.length) {
     return;
   }
-  const schema = {
-    type: "object",
-    additionalProperties: false,
-    required: ["findings"],
-    properties: {
-      findings: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["id", "suspectedCause", "suggestedFix", "source"],
-          properties: {
-            id: { type: "string" },
-            suspectedCause: { type: "string" },
-            suggestedFix: { type: "string" },
-            source: { type: "array", items: { type: "string" } },
-          },
-        },
-      },
-    },
-  };
   const evidence = await Promise.all(
     session.executions
       .filter((run) =>
@@ -268,7 +248,7 @@ async function assessFindings(session: Session, ui: Terminal): Promise<void> {
     invokeCodex({
       dir: join(session.dir, "finding-review-" + Date.now()),
       role: "reviewer",
-      schema,
+      schema: findingReviewSchema,
       signal: ui.controller.signal,
       timeout: session.input.timeout,
       ...(session.input.model ? { model: session.input.model } : {}),
@@ -276,7 +256,7 @@ async function assessFindings(session: Session, ui: Terminal): Promise<void> {
       prompt: `Independently assess evidence supporting these findings. Original observations/classifications are immutable. Return only suspected causes and suggested fixes, clearly labeling hypotheses. Cite source path:line only when the supplied source supports it. Environment and invalid-test failures do not establish application bugs.\n${JSON.stringify({ findings: current, evidence, source: session.context?.files, tests: session.revisions.at(-1)?.tests })}`,
     }),
   );
-  validateSchema(result, schema);
+  validateSchema(result, findingReviewSchema);
   for (const suggestion of (
     result as {
       findings: {
@@ -399,24 +379,6 @@ export async function check(
             join(session.dir, "selected-local-source"),
             false,
           );
-          for (const file of session.context.files) {
-            if (
-              !session.context.changes.some(
-                (change) =>
-                  change.path === file.path && change.status.startsWith("D"),
-              )
-            ) {
-              const frozen = await readFile(
-                join(session.context.snapshot, file.path),
-                "utf8",
-              );
-              if (frozen !== file.content) {
-                throw new Error(
-                  "Local source changed during collection; restart with a stable working tree.",
-                );
-              }
-            }
-          }
         }
         ui.section("Branch context");
         ui.show(

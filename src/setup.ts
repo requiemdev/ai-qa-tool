@@ -26,10 +26,8 @@ export default async function setup(config: FullConfig): Promise<void> {
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   try {
     browser = await chromium.launch();
-    const storageState = config.projects[0]?.use.storageState;
     const project = config.projects[0]?.use;
     const context = await browser.newContext({
-      ...(storageState ? { storageState } : {}),
       ...(project?.viewport ? { viewport: project.viewport } : {}),
       ...(project?.reducedMotion
         ? { reducedMotion: project.reducedMotion }
@@ -55,7 +53,7 @@ export default async function setup(config: FullConfig): Promise<void> {
           /(^|\/)(?:login|signin|sign-in|auth)(\/|$)/i.test(final.pathname))
       ) {
         throw new Error(
-          `Authentication redirect to ${final.origin}${final.pathname}; supply prepared --storage-state.`,
+          `Authentication redirect to ${final.origin}${final.pathname}; authentication flows are outside the guided workflow's scope.`,
         );
       }
       await context.tracing.stop();
@@ -77,4 +75,3 @@ export default async function setup(config: FullConfig): Promise<void> {
     await browser?.close();
   }
 }
-
