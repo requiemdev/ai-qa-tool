@@ -117,6 +117,20 @@ export const reviewSchema = object({
 });
 
 /**
+ * JSON Schema defining independent assessment of execution findings.
+ */
+export const findingReviewSchema = object({
+  findings: array(
+    object({
+      id: string,
+      suspectedCause: string,
+      suggestedFix: string,
+      source: strings,
+    }),
+  ),
+});
+
+/**
  * Recursively validates an untrusted AI response against a JSON Schema definition,
  * verifying types, required object fields, and enum values.
  *
@@ -501,4 +515,3 @@ export async function reviewRevision(
     mode: 0o600,
   });
 }
-

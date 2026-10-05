@@ -347,13 +347,6 @@ export async function collectBranch(options: {
     await add(change.path, diff, false, change.status.startsWith("D"));
   }
   if (local) {
-    for (const change of changes) {
-      if (change.status.startsWith("D") && tree.includes(change.path)) {
-        tree.splice(tree.indexOf(change.path), 1);
-      }
-    }
-  }
-  if (local) {
     for (const path of untracked) {
       if (eligible.test(path)) {
         await add(path, "Opt-in untracked local source.");
@@ -601,4 +594,3 @@ export async function createSnapshot(
   }
   return snapshot;
 }
-
