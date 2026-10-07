@@ -145,3 +145,5 @@ vite.config.ts.timestamp-*
 playwright-report/
 test-results/
 *.storage-state.json
+.DS_Store
+.agents

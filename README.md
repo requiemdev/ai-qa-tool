@@ -2,11 +2,11 @@
 
 Interactive local pre-merge QA for JavaScript/TypeScript projects:
 
-**Select repo → enter URL and intent → analyse/explore → generate tests → approve and run → report.**
+**Select repo → enter URL and intent → analyse/explore → generate tests → approve and run → conditional evidence assessment → report.**
 
 The default requires four responses: repository path, localhost URL, intent, and execution approval. Supply the first three as flags to leave only execution approval.
 
-Codex uses your local ChatGPT sign-in for sequential QA planning, browser exploration through Playwright MCP, test generation, in three AI stages. Repeatable browser tests run through Playwright Test. `--deep` adds detailed scenario review, existing-runner unit/integration coverage, independent AI test review, and finding assessment/classification.
+Codex uses your local ChatGPT sign-in for planning, scoped browser exploration through Playwright MCP, and test generation. A fourth AI stage assesses evidence only when unresolved execution findings or pending improvement candidates exist. Repeatable browser tests run through Playwright Test. Normal sessions generate and run browser and existing-runner unit/integration tests, and can report improvements even when every check passes. `--deep` adds detailed scenario review, independent AI test review, and manual finding classification.
 
 ## Install
 
@@ -47,7 +47,7 @@ Supplied flags bypass their prompts. Intent becomes AC1 unless explicit criteria
 | `--change-type feature\|bug-fix` | Type of change. |
 | `--include-local` | Compatible explicit selection of local work, included by default. |
 | `--committed-only` | Exclude staged, unstaged, and untracked work; conflicts with `--include-local`. |
-| `--deep` | Detailed scenario review, existing-runner unit/integration tests, independent review, and finding classification. |
+| `--deep` | Detailed scenario review, independent review, and finding classification. |
 | `--context <file>` | Repeatable supporting context from the selected revision. |
 | `--timeout <milliseconds>` | Per AI stage/test group limit, default 600000; range 1000–3600000. |
 | `--model <name>` | Explicit Codex model override for guided stages; default is `gpt-5.6-luna` with `medium` reasoning (`xhigh` for deep sessions). |
@@ -58,13 +58,19 @@ The checked-out target branch is reviewed without switching branches. Comparison
 
 The branch summary labels the target branch and comparison reference separately and shows head/merge-base SHAs, commit subjects/bodies, changed paths, detected runners, omitted context, and the AI analysis. Commit/intent conflicts require recorded developer clarification.
 
-By default the displayed plan automatically selects scenarios, separately from developer approval. It targets 1–3 browser scenarios around changed behavior and the most relevant regression, with explicit criteria overriding that target. Changes without browser-verifiable behavior are reported as a limitation with a suggestion to use `--deep`.
+By default the displayed plan automatically selects scenarios, separately from developer approval. It targets 1–3 focused browser or unit/integration scenarios around changed behavior and the most relevant regression, with explicit criteria overriding that target. Unit/integration tests use detected existing runners in both normal and deep sessions; unavailable runners or prerequisites are reported as coverage gaps.
+
+Planning may propose source-grounded improvement candidates. Exploration inspects the selected flows for unclear instructions, weak success/error feedback, unnecessary steps, and relevant keyboard or responsive usability problems. It uses keyboard and resize tools only when relevant to the changed behavior; this is not a whole-app UX audit. Empty improvement output is valid. Benefits are inferred, and candidates never become acceptance requirements or generate tests solely to enforce a preference.
+
+After execution, conditional evidence assessment marks each pending candidate **supported**, **unverified**, or **dismissed**. Supported recommendations include the observation, expected benefit, priority, suggested change, and retained evidence. Unverified candidates are labelled separately; dismissed observations remain in detailed history. Passing checks and observed failures remain separate from advisories. An unavailable assessment preserves execution results and marks candidates unverified; normal coverage, pass/fail status, and exit codes still follow execution and acceptance coverage. Deep mode retains its independent assessment failure accounting. Reopening a completed session does not repeat assessment; reruns or revised plans returning to the findings stage can assess newly pending candidates.
 
 With `--deep`, review scenarios with `approve`, `edit`, `add`, or `exclude`. Exclusion requires a reason. Scenarios map to stable acceptance IDs such as `AC1` and stable scenario IDs such as `S1`. Exploration exercises only approved flows, using snapshots at each state, including dialogs, navigation, and dynamically rendered controls. Progress prints browser tool activity; successful and failed interactions retain screenshots and action evidence.
 
-The default displays scope, assumed prerequisites, complete generated source, hashes, and required support before one prompt: **Run all / inspect / edit / regenerate / cancel**. `Run all` approves the exact displayed files and execution, then runs immediately. Results and reports are saved automatically; there are no mandatory classification, gap-exclusion, finish, or export prompts. Failed checks and incomplete selected coverage cannot become passing.
+The default displays scope, assumed prerequisites, test summaries, hashes, required support, and the saved test folder before one prompt: **Run all / inspect / edit / regenerate / cancel**. Test source is hidden unless you choose `inspect` (or `source` with `--deep`). `Run all` approves the exact listed files and execution, then runs immediately. Test files, results, and reports are saved automatically inside the session folder; there are no mandatory classification, gap-exclusion, finish, or export prompts. Failed checks and incomplete selected coverage cannot become passing. If some approved tests passed but selected coverage or execution remains incomplete, the result is **partial**; **blocked** means there are no usable passing tests. Results list passing test IDs and the saved test folder so you can reuse them while keeping gaps recorded. A failed check still produces **failed**, even when other tests pass.
 
 With `--deep`, review generated tests with `source`, `edit`, `regenerate`, `approve`, or `reject`. Enter test IDs to approve a subset, or explicitly enter `all`. Required support files are included in that approval. Edits use `VISUAL` or `EDITOR`; configure an editor that waits for completion, for example `EDITOR='code --wait'`. Without an editor, the CLI prints a new revision path for you to edit and save. Every edit or regeneration creates a new retained revision, requiring fresh approval; deep sessions also perform independent review. Files changed after approval block execution.
+
+Each generated or edited revision automatically saves its tests and required support files under the session folder at `generated-tests/revision-*/tests/`, preserving relative paths and imports. The CLI and report show this folder; no export command is needed to save files within the session. Selecting `finish` saves the final report and ends the guided flow; copying tests into the target repository remains an explicit `export` command.
 
 Deep results retain original observations. Classify each finding as `bug`, `intended`, `invalid`, or `unresolved`, with a reason. Classification adds feedback and never changes the executed files or erases a failed run. `revise-tests`, `revise-plan`, and `rerun` require another review/approval. Reported gaps can be explicitly excluded from accepted scope with a recorded reason; uncovered approved scenarios still prevent a passing outcome.
 
@@ -77,7 +83,7 @@ npm run qa -- export --session session-2026-10-04T08-00-00-000Z-example
 
 Use the actual printed session ID. `review` resumes the saved stage; pass `--timeout` to override its saved per-stage limit. `review --session` offers optional result follow-up, including revisions and reruns. Legacy sessions retain their detailed behavior and saved source scope; new sessions persist depth and local selection. Enter `cancel`/`quit`, press Ctrl-C, or close input to retain partial results. An interrupted execution is not automatically trusted as passing; resuming requires explicit execution confirmation. A timed-out exploration retains logs/evidence and records incomplete scenarios. Reopening continues with the saved source selection; start a new session to select another revision.
 
-Export explicitly selected approved tests and their required test-only support. The CLI shows destinations and file contents/diffs before asking for approval. Existing destinations require another path. Exclusive creation prevents overwriting a file that appears during export. If you relocate files, keep relative imports valid. Export never commits or merges anything.
+Export explicitly selected approved tests and their required test-only support. Export is available for partial, failed, and blocked sessions too; choose the passing test IDs shown in Results when reusing successful checks. The CLI shows destinations and file contents/diffs before asking for approval. Existing destinations require another path. Exclusive creation prevents overwriting a file that appears during export. If you relocate files, keep relative imports valid. Export never commits or merges anything.
 
 ## Source and execution boundaries
 
@@ -93,12 +99,13 @@ AI stages use `gpt-5.6-luna` with `medium` reasoning by default (`xhigh` for dee
 
 Each guided session lives under the tool checkout's ignored `.agent-qa/session-*/` directory:
 
-- `session.json` and `report.json`: version 2 records linking source, scenarios, exploration, test revisions, execution IDs/file hashes, findings, feedback, and exports.
-- `report.md`: readable scope, source assumptions, coverage, omitted context, evidence, findings, and feedback.
-- `analysis-*`, `exploration-*`, revision directories: prompts, strict schemas, model responses, invocation metadata, stdout/stderr, independent reviews, screenshots, MCP action logs and raw traces.
+- `session.json` and `report.json`: version 2 records linking source, scenarios, exploration, test revisions, execution IDs/file hashes, findings, improvements, feedback, and exports.
+- `report.md`: selected-scope outcome, observed failures, potential improvements, coverage limitations, passing checks, and detailed source/evidence/history.
+- `generated-tests/revision-*/tests/`: generated unit/integration and Playwright tests with required support files; each revision preserves original relative paths and imports.
+- `analysis-*`, `exploration-*`, `generated-tests/revision-*`: prompts, strict schemas, model responses, invocation metadata, stdout/stderr, independent reviews, screenshots, MCP action logs and raw traces.
 - `execution-*`: exact selected specs/support, disposable source snapshots, execution records, logs, runner JSON, Playwright screenshots and trace ZIPs.
 
-Exit codes: **0** completed passing accepted scope; **1** failed checks; **2** blocked, invalid, cancelled, or incomplete scope. An intended/invalid classification does not turn the original failure into a pass. Suggested causes and fixes are separated from observations; source citations are retained only for supplied files.
+Exit codes: **0** completed passing accepted scope; **1** failed checks; **2** partial, blocked, invalid, cancelled, or incomplete scope. Partial results allow test reuse but still signal incomplete coverage to CI. An intended/invalid classification does not turn the original failure into a pass. Suggested causes and fixes are separated from observations; source citations are retained only for supplied files.
 
 ```sh
 npm test                     # Git selection, contracts, review/cancel, export, process checks
@@ -112,6 +119,30 @@ npx playwright show-trace /absolute/path/to/trace.zip
 ```
 
 Live checks need process/network permissions and use your signed-in Codex account. The fixtures have no authentication/backend services. Reports and traces can contain source, application text, and sensitive browser data; keep `.agent-qa/` private.
+
+## Code organization
+
+The CLI delegates to `src/workflow.ts`, which coordinates the persisted QA stages.
+Modules separate shared data definitions from the operations that use them:
+
+| Module | Responsibility |
+| --- | --- |
+| `session-types.ts` | Serializable scenarios, generated tests, exploration, executions, findings, improvements, feedback, and session state. |
+| `context-types.ts` | Git changes, source context, branch metadata, and detected test runners. |
+| `session.ts` | Session persistence, feedback history, coverage accounting, reports, and artifact path validation. |
+| `context.ts` / `branch.ts` | Safe source reads, Git inspection, runner detection, and source snapshots. |
+| `schemas.ts` | Structured AI response schemas and strict recursive validation. |
+| `stages.ts` | AI analysis, browser exploration, test generation, and independent review. |
+| `interactive.ts` | Terminal prompts, scenario/test/finding review, editing, and export. |
+| `execution.ts` | Approved-file validation, runner invocation, baselines, and execution persistence. |
+| `runner-results.ts` | Pure runner-result classification, per-file outcomes, and failure summaries. |
+| `codex.ts` / `process.ts` | Codex configuration and subprocess lifecycle management. |
+| `setup.ts` / `node-reporter.ts` | Playwright preflight and native Node test event reporting. |
+
+Import shared types from the type modules and AI schemas from `schemas.ts` for new code.
+The original modules re-export their existing public types, schemas, and result helpers
+so existing imports remain valid. Keep model field documentation alongside its type;
+keep operational documentation alongside the function that implements it.
 
 ## References and attribution
 

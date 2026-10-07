@@ -14,7 +14,7 @@
  * 6. execute: Executes approved tests against the running server via `execution.executeRevision`.
  * 7. findings: Synthesizes execution failures via `assessFindings` (using `codex.invokeCodex`)
  *    and interactive developer review via `interactive.reviewFindings`.
- * 8. complete: Computes final status via `finishStatus`, offers test export via `interactive.exportTests`.
+ * 8. complete: Computes final status via `finishStatus` and returns the saved session.
  */
 
 import { readFile } from "node:fs/promises";
@@ -29,9 +29,10 @@ import {
   saveSession,
   feedback,
   coverageGaps,
+  passingTests,
   isDeep,
-  type Session,
 } from "./session.js";
+import type { Session } from "./session-types.js";
 import {
   Terminal,
   reviewScenarios,
@@ -44,9 +45,8 @@ import {
   explore,
   generate,
   reviewRevision,
-  validateSchema,
-  findingReviewSchema,
 } from "./stages.js";
+import { validateSchema, findingReviewSchema } from "./schemas.js";
 import { executeRevision } from "./execution.js";
 import { DEFAULT_TIMEOUT, invokeCodex } from "./codex.js";
 
@@ -68,8 +68,11 @@ export type CheckOptions = {
   base?: string;
   /** Whether to include local working tree modifications and untracked files. */
   local?: boolean;
+  /** Excludes local changes; cannot be combined with an explicit local selection. */
   committedOnly?: boolean;
+  /** Enables detailed scenario review and independent test/finding review. */
   deep?: boolean;
+  /** Offers result revisions and reruns when reopening a completed standard session. */
   followup?: boolean;
   /** Explicit glob patterns or file paths to include as supporting context. */
   context?: string[];
@@ -116,13 +119,17 @@ async function collectInput(
   const repo = (
     await git(resolve(suppliedRepo), ["rev-parse", "--show-toplevel"])
   ).trim();
-  const base = options.base ?? (await baseCandidates(repo))[0] ??
+  const base =
+    options.base ??
+    (await baseCandidates(repo))[0] ??
     (await ui.required("Comparison reference (no fetch)"));
-  const url = localUrl(options.url ?? await ui.required("Running localhost URL"));
+  const url = localUrl(options.url ?? (await ui.required("Running localhost URL")));
   const intent = options.intent ?? (await ui.required("Feature/bug-fix description"));
-  if (!intent.trim()) { throw new Error("Intent cannot be empty."); }
+  if (!intent.trim()) {
+    throw new Error("Intent cannot be empty.");
+  }
   const criteria = options.criteria?.length ? options.criteria : [intent];
-  if (criteria.some(value => !value.trim())) {
+  if (criteria.some((value) => !value.trim())) {
     throw new Error("Acceptance criteria cannot be empty.");
   }
   const changeType = options.changeType ?? "feature";
@@ -209,21 +216,24 @@ async function assessFindings(session: Session, ui: Terminal): Promise<void> {
   const current = session.findings.filter(
     (item) => !item.suspectedCause && !item.suggestedFix,
   );
-  if (!current.length) {
+  const pending = session.improvements.filter((item) => item.assessment === "pending");
+  if (!current.length && !pending.length) {
     return;
   }
   const evidence = await Promise.all(
     session.executions
       .filter((run) =>
-        current.some((finding) => finding.executionId === run.id),
+        current.some((finding) => finding.executionId === run.id) ||
+        pending.some((candidate) => session.revisions.find((revision) => revision.number === run.revision)?.tests.some((test) => run.testIds.includes(test.id) && test.scenarioIds.some((id) => candidate.scenarioIds.includes(id)))),
       )
+      .slice(-12)
       .map(async (run) => ({
-        run,
-        results: summarizeEvidence(
+        run: { id: run.id, revision: run.revision, phase: run.phase, runner: run.runner, testIds: run.testIds, status: run.status, artifacts: run.artifacts, reason: run.reason.slice(0, 1000) },
+        results: JSON.stringify(summarizeEvidence(
           await readFile(join(run.artifacts, "results.json"), "utf8").catch(
             () => "",
           ),
-        ),
+        )).slice(0, 12000),
         stderr: (
           await readFile(join(run.artifacts, "stderr.log"), "utf8").catch(
             () => "",
@@ -231,7 +241,7 @@ async function assessFindings(session: Session, ui: Terminal): Promise<void> {
         ).slice(-3000),
       })),
   );
-  const result = await ui.working("Assessing findings", async (progress) =>
+  const result = await ui.working("Assessing findings and improvement evidence", async (progress) =>
     invokeCodex({
       dir: join(session.dir, "finding-review-" + Date.now()),
       role: "reviewer",
@@ -241,37 +251,42 @@ async function assessFindings(session: Session, ui: Terminal): Promise<void> {
       timeout: session.input.timeout,
       ...(session.input.model ? { model: session.input.model } : {}),
       progress,
-      prompt: `Independently assess evidence supporting these findings. Original observations/classifications are immutable. Return only suspected causes and suggested fixes, clearly labeling hypotheses. Cite source path:line only when the supplied source supports it. Environment and invalid-test failures do not establish application bugs.\n${JSON.stringify({ findings: current, evidence, source: session.context?.files, tests: session.revisions.at(-1)?.tests })}`,
+      prompt: `Assess the supplied execution findings and pending improvement candidates against the structured observations, source and bounded execution evidence. Original observations/classifications and candidate descriptions are immutable. Return exactly one finding assessment for each supplied finding ID and exactly one improvement assessment for each supplied candidate ID; no unknown or duplicate IDs. Finding causes and fixes must clearly label hypotheses. Cite source path:line only when supplied source supports it. Environment and invalid-test failures do not establish application bugs. Improvement assessment must be supported, unverified or dismissed with a meaningful reason. Support only evidence-backed recommendations; dismiss unsupported preferences and alternatives that do not improve intentional behavior. A passing check can coexist with a supported improvement; advisories never change acceptance requirements. Artifact paths are references, not image content: no screenshots are supplied to you, so do not claim screenshot inspection. Use supplied structured flow observations and text evidence; if visual support is unavailable, mark that claim unverified.\n${JSON.stringify({ input: session.input, developerFeedback: session.feedback, findings: current, improvements: pending, observations: session.explorations, executionEvidence: JSON.stringify(evidence).slice(0, 18000), executionEvidenceLimit: "Latest 12 relevant runs; text capped at 18000 characters. Truncated evidence may require an unverified assessment.", source: session.context?.files, tests: session.revisions.at(-1)?.tests })}`,
     }),
   );
   validateSchema(result, findingReviewSchema);
-  for (const suggestion of (
-    result as {
-      findings: {
-        id: string;
-        suspectedCause: string;
-        suggestedFix: string;
-        source: string[];
-      }[];
+  const review = result as {
+    findings: { id: string; suspectedCause: string; suggestedFix: string; source: string[] }[];
+    improvements: { id: string; assessment: "supported" | "unverified" | "dismissed"; assessmentReason: string }[];
+  };
+  for (const [supplied, returned] of [[current, review.findings], [pending, review.improvements]] as const) {
+    if (returned.length !== supplied.length || new Set(returned.map((item) => item.id)).size !== returned.length || returned.some((item) => !supplied.some((candidate) => candidate.id === item.id))) {
+      throw new Error("Evidence assessment must map each supplied ID exactly once, without unknown or duplicate IDs.");
     }
-  ).findings) {
-    const finding = current.find((item) => item.id === suggestion.id);
-    if (!finding) {
-      throw new Error("Reviewer referenced unknown finding.");
-    }
+  }
+  if (review.improvements.some((item) => !item.assessmentReason.trim())) {
+    throw new Error("Improvement assessment requires a meaningful reason.");
+  }
+  for (const suggestion of review.findings) {
+    const finding = current.find((item) => item.id === suggestion.id)!;
     finding.suspectedCause = suggestion.suspectedCause;
     finding.suggestedFix = suggestion.suggestedFix;
-    finding.source = suggestion.source.filter((citation) =>
-      session.context?.files.some((file) =>
-        citation.startsWith(file.path + ":"),
-      ),
-    );
+    finding.source = suggestion.source.filter((citation) => {
+      const match = /^(.*):([1-9]\d*)$/.exec(citation);
+      const file = match && session.context?.files.find((file) => file.path === match[1]);
+      return file && Number(match![2]) <= file.content.split("\n").length;
+    });
+  }
+  for (const assessment of review.improvements) {
+    const candidate = pending.find((item) => item.id === assessment.id)!;
+    candidate.assessment = assessment.assessment;
+    candidate.assessmentReason = assessment.assessmentReason;
   }
 }
 
 /**
- * Determines and sets the final session outcome status ("passed", "failed", or "blocked")
- * based on the most recent execution outcomes for each runner and unresolved coverage gaps.
+ * Determines the final outcome from current executions and coverage gaps,
+ * retaining usable passing tests as partial coverage.
  *
  * @param session - Current QA session to finalize.
  */
@@ -291,16 +306,18 @@ function finishStatus(session: Session): void {
     coverageGaps(session).length ||
     unresolvedGaps(session).length
   ) {
-    session.status = "blocked";
+    session.status = passingTests(session).length ? "partial" : "blocked";
   } else {
     session.status = "passed";
   }
   session.reason =
     session.status === "passed"
       ? "Approved scope passed."
-      : session.status === "failed"
-        ? "Checks failed; original evidence and developer classifications retained."
-        : "Execution or approved coverage is incomplete; inspect report.";
+      : session.status === "partial"
+        ? "Passing tests are available for reuse; selected coverage or execution remains incomplete."
+        : session.status === "failed"
+          ? "Checks failed; original evidence and developer classifications retained."
+          : "Execution or approved coverage is incomplete; inspect report.";
 }
 
 /**
@@ -324,7 +341,7 @@ function unresolvedGaps(session: Session): string[] {
 /**
  * Coordinates and executes the end-to-end interactive QA verification workflow.
  * Manages state persistence, pipeline stage transitions (context -> plan -> explore -> generate -> review -> execute -> findings -> complete),
- * cancellation signal handling, and final report / test export.
+ * cancellation signal handling, and final report persistence.
  *
  * @param options - Session configuration options.
  * @param ui - Terminal UI manager (defaults to a new Terminal instance).
@@ -397,7 +414,11 @@ export async function check(
           }
           session.assumptions.basis = "developer-confirmed";
         } else {
-          session.assumptions = { serverMatchesSource: true, repeatableData: true, basis: "assumed" };
+          session.assumptions = {
+            serverMatchesSource: true,
+            repeatableData: true,
+            basis: "assumed",
+          };
           ui.show("Assumed prerequisites: server represents the selected source; development data is repeatable/resettable. Browser isolation does not reset backend state.");
         }
         session.stage = "plan";
@@ -433,12 +454,25 @@ export async function check(
           await reviewScenarios(session, ui);
         } else {
           for (const item of session.scenarios) {
-            if (item.status !== "excluded") { item.status = "selected"; }
+            if (item.status !== "excluded") {
+              item.status = "selected";
+            }
           }
-          ui.show(session.scenarios.map(item => `${item.id} [${item.status}] ${item.title} (${item.criteria.join(", ")})\n  ${item.steps.join(" → ")}\n  Expect: ${item.expected}`).join("\n\n"));
-          feedback(session, "plan", "automatically-selected", "Displayed scenarios selected automatically; this is not developer approval.");
+          ui.show(
+            session.scenarios
+              .map((item) =>
+                `${item.id} [${item.status}] ${item.title} (${item.criteria.join(", ")})\n  ${item.steps.join(" → ")}\n  Expect: ${item.expected}`,
+              )
+              .join("\n\n"),
+          );
+          feedback(
+            session,
+            "plan",
+            "automatically-selected",
+            "Displayed scenarios selected automatically; this is not developer approval.",
+          );
           if (!session.scenarios.length) {
-            const limitation = "No browser-verifiable behavior identified. Standard review cannot verify this change; use --deep for existing-runner unit/integration coverage.";
+            const limitation = "No testable scenarios identified. Inspect the reported coverage gaps and available runners.";
             session.gaps.push(limitation);
             session.status = "blocked";
             session.reason = limitation;
@@ -517,6 +551,25 @@ export async function check(
         await saveSession(session);
       }
       if (session.stage === "findings" || session.stage === "complete") {
+        if (session.stage === "findings") {
+          try {
+            await assessFindings(session, ui);
+          } catch (error) {
+            if (ui.controller.signal.aborted) {
+              throw error;
+            }
+            const reason = error instanceof Error ? error.message : String(error);
+            ui.warn(`Evidence assessment incomplete: ${reason}`);
+            for (const candidate of session.improvements.filter((item) => item.assessment === "pending")) {
+              candidate.assessment = "unverified";
+              candidate.assessmentReason = "Evidence assessment unavailable: " + reason;
+            }
+            if (isDeep(session)) {
+              session.gaps.push("Independent finding assessment incomplete.");
+            }
+          }
+          await saveSession(session);
+        }
         if (!isDeep(session) && !options.followup) {
           await reviewFindings(session, ui, false);
           ui.show([...coverageGaps(session), ...unresolvedGaps(session)].join("\n") || "Selected coverage complete.");
@@ -524,19 +577,6 @@ export async function check(
           session.stage = "complete";
           await saveSession(session);
           return session;
-        }
-        if (isDeep(session) && session.stage === "findings") {
-          try {
-            await assessFindings(session, ui);
-          } catch (error) {
-            if (ui.controller.signal.aborted) {
-              throw error;
-            }
-            ui.warn(
-              `Finding review incomplete: ${error instanceof Error ? error.message : String(error)}`,
-            );
-            session.gaps.push("Independent finding assessment incomplete.");
-          }
         }
         await reviewFindings(session, ui);
         ui.section("Coverage");
@@ -588,9 +628,6 @@ export async function check(
         finishStatus(session);
         session.stage = "complete";
         await saveSession(session);
-        if (await ui.confirm("Export selected approved tests")) {
-          await exportTests(session, ui);
-        }
         return session;
       }
     }

@@ -77,6 +77,7 @@ for (const kind of ["node", "vitest", "jest"] as const) {
       git("add", ".");
       git("commit", "-qm", "Format confirmation");
       const session = await newSession({
+        depth: "standard",
         repo,
         url: "http://127.0.0.1:1/",
         intent: "formatResult(name) returns Created followed by the exact name",
@@ -135,7 +136,7 @@ for (const kind of ["node", "vitest", "jest"] as const) {
           (item) => item.kind === "unit" || item.kind === "integration",
         ),
       );
-      const dir = join(session.dir, "revision-1");
+      const dir = join(session.dir, "generated-tests", "revision-1");
       for (const item of generated.tests) {
         item.approved = true;
         const path = join(dir, "tests", item.path);

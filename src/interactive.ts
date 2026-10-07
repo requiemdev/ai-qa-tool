@@ -30,9 +30,11 @@ import {
   saveSession,
   sha256,
   containedPath,
-  type Session,
-  type Scenario,
+  coverageGaps,
+  passingTests,
+  formatImprovement,
 } from "./session.js";
+import type { Session, Scenario } from "./session-types.js";
 import { selectSupport } from "./execution.js";
 import { validateTests } from "./stages.js";
 
@@ -384,6 +386,7 @@ export async function editRevision(
   const number = session.revisions.length + 1;
   const dir = join(
     session.dir,
+    "generated-tests",
     "revision-" + number + "-" + randomUUID().slice(0, 8),
   );
   for (const item of original.tests) {
@@ -465,7 +468,8 @@ export async function reviewTests(
         )
         .join("\n")}${isDeep(session) ? "\n\nIndependent review:\n" + revision.review : "\n\nIndependent AI review skipped (standard depth)."}`,
     );
-    if (isDeep(session) && session.context) {
+    ui.show(`Test files saved automatically: ${join(revision.dir, "tests")}`);
+    if (session.context) {
       ui.show(
         "Existing baseline files to execute before generated unit/integration tests:\n" +
           session.context.runners
@@ -478,13 +482,14 @@ export async function reviewTests(
     }
     if (!isDeep(session)) {
       ui.show(`Scope: ${session.input.intent}\n${session.input.criteria.map((text, i) => `AC${i + 1}: ${text}`).join("\n")}\nComparison reference: ${session.input.base}; target branch: ${session.context?.branch || "(detached/pending)"}; local work: ${session.input.local ? "included" : "excluded"}.\nPrerequisites (${session.assumptions.basis ?? "assumed"}): matching server and repeatable development data. Required support is included in Run all.`);
-      for (const item of revision.tests) { ui.show(`--- ${item.path} ---\n${item.content}`); }
     }
     const action = (await ui.ask(
-      isDeep(session) ? "Tests: source / edit / regenerate / approve / reject" : "Run all / inspect / edit / regenerate / cancel (approves displayed files, required support, and execution as trusted local code)",
+      isDeep(session) ? "Tests: source / edit / regenerate / approve / reject" : "Run all / inspect / edit / regenerate / cancel (approves listed files, required support, and execution as trusted local code)",
       isDeep(session) ? "source" : "",
     )).toLowerCase();
-    if (action === "cancel") { throw new Error("Cancelled."); }
+    if (action === "cancel") {
+      throw new Error("Cancelled.");
+    }
     if (action === "source" || action === "inspect") {
       const id = await ui.required("Test ID (or all)", "all");
       for (const item of revision.tests.filter(
@@ -569,19 +574,19 @@ export async function reviewFindings(
   classify = true,
 ): Promise<void> {
   ui.section("Results");
-  for (const item of session.executions) {
-    const symbol = item.status === "passed" ? pc.green("✔") : pc.red("✖");
-    const statusText =
-      item.status === "passed" ? pc.green(item.status) : pc.red(item.status);
-    ui.show(
-      `${symbol} ${item.phase}/${item.runner}: ${statusText} ${pc.dim("(" + item.artifacts + ")")}`,
-    );
-  }
+  const revision = session.revisions.at(-1)?.number;
+  const latest = new Map(session.executions.filter((run) => run.revision === revision).map((run) => [run.phase + ":" + run.runner, run]));
+  ui.show(`Selected scope: ${session.input.intent}\nSelected-scope checks: ${[...latest.values()].map((run) => `${run.phase}/${run.runner}: ${run.status}`).join(", ") || "No execution results."}`);
+  ui.section("Observed failures");
+  if (!session.findings.length) ui.show("None recorded.");
   for (const finding of session.findings) {
     ui.show(
-      `${pc.bold(pc.red("Finding " + finding.id))}: ${pc.bold(finding.category)}\n${finding.observed}\nEvidence: ${finding.evidence.join(", ")}\nSuspected cause: ${finding.suspectedCause || "Unknown"}\nSuggested fix: ${finding.suggestedFix || "Inspect evidence"}`,
+      `${pc.bold(pc.red("Observed failure " + finding.id))}: ${pc.bold(finding.category)}\n${finding.observed.split("\n")[0]}\nEvidence: ${finding.evidence.join(", ")}\nSuspected cause: ${finding.suspectedCause || "Unknown"}\nSuggested fix: ${finding.suggestedFix || "Inspect evidence"}`,
     );
-    if (!classify || session.feedback.some((item) => item.targetId === finding.id)) {
+    if (
+      !classify ||
+      session.feedback.some((item) => item.targetId === finding.id)
+    ) {
       continue;
     }
     let decision: string;
@@ -597,6 +602,23 @@ export async function reviewFindings(
       await ui.required("Reason/evidence for classification"),
     );
     await saveSession(session);
+  }
+  ui.section("Potential improvements");
+  const supported = session.improvements.filter((item) => item.assessment === "supported");
+  if (!supported.length) ui.show(session.improvements.length ? "No supported recommendations; candidate history is retained in the report." : "No improvements were identified within the inspected scope.");
+  for (const item of supported) ui.show(formatImprovement(item));
+  const unverified = session.improvements.filter((item) => item.assessment === "pending" || item.assessment === "unverified");
+  if (unverified.length) {
+    ui.section("Unverified improvement candidates");
+    for (const item of unverified) ui.show(formatImprovement(item));
+  }
+  ui.section("Coverage limitations");
+  ui.show([...new Set([...session.gaps, ...coverageGaps(session)])].join("\n") || "None recorded.");
+  const passed = passingTests(session);
+  ui.show(`Passing checks: ${passed.map((test) => `${test.id}: ${test.path}`).join(", ") || "None."}`);
+  ui.section("Execution evidence");
+  for (const item of session.executions) {
+    ui.show(`${item.phase}/${item.runner}: ${item.status} (${item.artifacts})`);
   }
 }
 
@@ -715,4 +737,3 @@ export async function exportTests(
   );
   await saveSession(session);
 }
-

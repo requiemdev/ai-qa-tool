@@ -10,6 +10,10 @@ import { promisify } from "node:util";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 
+import type { Change } from "./context-types.js";
+
+export type { Change, Context } from "./context-types.js";
+
 const exec = promisify(execFile);
 
 /**
@@ -24,37 +28,6 @@ export const MAX_CONTEXT_BYTES = 100_000;
 const excluded =
   /(^|\/)(?:node_modules|dist|build|out|coverage|\.git|\.agent-qa|\.next|\.nuxt|\.cache|\.output|\.svelte-kit|\.aws|\.ssh)(\/|$)|(^|\/)(?:secrets?|credentials?)(?:\.[^\/]*)?(\/|$)|(^|\/)\.env(?:\.|$)|(?:\.pem|\.key|\.p12|\.pfx|\.map|\.min\.[jt]s|\.storage-state\.json)$|(^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml|\.npmrc|\.netrc|\.git-credentials|\.pypirc|id_rsa|id_ed25519)$/i;
 
-/**
- * Represents a changed file detected by Git diff.
- */
-export type Change = {
-  /** Git status code (e.g. M, A, D, R100). */
-  status: string;
-  /** Current relative file path. */
-  path: string;
-  /** Prior path if file was renamed or copied. */
-  previousPath?: string;
-};
-
-/**
- * Aggregated source code and Git metadata collected for analysis.
- */
-export type Context = {
-  /** Absolute path to repository root. */
-  repo: string;
-  /** Comparison ref or merge base sha. */
-  comparison: string;
-  /** List of detected file changes. */
-  changes: Change[];
-  /** List of untracked file paths. */
-  untracked: string[];
-  /** List of files skipped due to size or exclusion rules. */
-  skipped: string[];
-  /** List of auxiliary files discovered via local imports. */
-  imported: string[];
-  /** Loaded source files along with unified diffs. */
-  files: { path: string; content: string; diff: string }[];
-};
 
 /**
  * Executes a Git command safely within the target repository.
@@ -156,4 +129,3 @@ async function safeContent(repo: string, path: string): Promise<string> {
 }
 
 export { git, excluded, safeContent };
-
