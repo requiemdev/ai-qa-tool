@@ -26,6 +26,7 @@ import {
   loadSession,
   feedback,
   coverageGaps,
+  passingTests,
   sessionExitCode,
   sha256,
   containedPath,
@@ -105,6 +106,8 @@ test("browser prompts match the enabled action set", () => {
   }
   assert.match(browserActionSetPrompt, /only those exact tool names/);
   assert.match(browserActionSetPrompt, /hover, drag, evaluate, arbitrary code/);
+  assert.match(browserActionSetPrompt, /deferred to generated Playwright assertions/);
+  assert.match(browserActionSetPrompt, /Intentional depth skips.*never be returned as gaps/);
 });
 
 test("committed branch selection excludes dirty imports and includes HTML/config/renames/deletes; bases use priority order", async () => {
@@ -533,7 +536,7 @@ test("standard browser validation accepts delegated Playwright support assertion
   }
 });
 
-test("export requires selected approved files, includes support, previews collisions and protects symlink escapes", async () => {
+test("partial sessions can export approved files with support, collision previews and symlink protection", async () => {
   const repo = await mkdtemp(join(tmpdir(), "qa-export-"));
   const session = await newSession({ ...input, repo });
   try {
@@ -568,6 +571,8 @@ test("export requires selected approved files, includes support, previews collis
       selectSupport(result.tests, ["T1"]).map((item) => item.id),
       ["T1", "H1"],
     );
+    session.status = "partial";
+    session.stage = "complete";
     await mkdir(join(repo, "tests"));
     await writeFile(join(repo, generated.path), "KEEP EXISTING");
     const ui = new ScriptedTerminal([
@@ -605,6 +610,7 @@ test("export requires selected approved files, includes support, previews collis
       (await loadSession(session.id)).exports[0]!.sha256,
       sha256(generated.content),
     );
+    assert.equal((await loadSession(session.id)).status, "partial");
   } finally {
     await rm(repo, { recursive: true, force: true });
     await rm(session.dir, { recursive: true, force: true });
@@ -735,13 +741,27 @@ writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(result));
       assert.equal(session.stage, "complete");
       assert.equal(session.status, "blocked"); // intentionally no execution coverage
       assert.equal(session.exports.length, 0);
-      assert(ui.output.some(text => text.startsWith("--- ")));
+      assert(!ui.output.some(text => text.startsWith("--- ")));
+      assert(!ui.output.some(text => text.includes("import {test,expect}")));
+      const revision = session.revisions.at(-1)!;
+      assert(ui.output.includes(`Test files saved automatically: ${join(revision.dir, "tests")}`));
+      for (const file of revision.tests) {
+        assert.equal(await readFile(join(revision.dir, "tests", file.path), "utf8"), file.content);
+      }
+      const inspectUi = new WorkflowTerminal(["inspect", "all", "run all"]);
+      try {
+        assert.equal(await reviewTests(session, inspectUi), "execute");
+        assert(inspectUi.output.some(text => text.startsWith("--- ") && text.includes(revision.tests[0]!.content)));
+      } finally {
+        inspectUi.close();
+      }
       const analysisDir = (await readdir(session.dir)).find(name => name.startsWith("analysis-"))!;
       const invocation = JSON.parse(await readFile(join(session.dir, analysisDir, "invocation.json"), "utf8"));
       assert.equal(invocation.reasoningEffort, "medium");
       const report = await readFile(join(session.dir, "report.md"), "utf8");
       assert.match(report, /Review depth: standard/);
       assert.match(report, /Prerequisites \(assumed\)/);
+      assert(report.includes(`Test files saved automatically: ${join(revision.dir, "tests")}`));
       session.stage = "execute";
       session.status = "cancelled";
       await saveSession(session);
@@ -802,17 +822,17 @@ writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(result));
   }
 });
 
-test("automatic reporting retains failed and incomplete selected coverage without mandatory classification", async () => {
+test("automatic reporting retains partial coverage and exposes only current passing tests without mandatory classification", async () => {
   const session = await newSession({ ...input, depth: "standard" });
   try {
     session.scenarios = [{ ...scenario, status: "selected" }];
     session.explorations = [{ scenarioId: "S1", status: "observed", steps: [], observed: "Created Ada", evidence: [] }];
     session.revisions = [{ number: 1, dir: session.dir, tests: validateTests({ tests: [generated], gaps: [] }, session).tests.map(item => ({ ...item, approved: true })), review: "", feedback: "" }];
     const run = { id: "run-1", revision: 1, phase: "generated" as const, runner: "playwright", testIds: ["T1"], files: [], status: "passed" as const, artifacts: session.dir, reason: "", startedAt: new Date().toISOString() };
-    for (const expected of ["passed", "failed", "blocked"] as const) {
+    for (const expected of ["passed", "failed", "partial", "blocked"] as const) {
       session.stage = "findings";
-      session.executions = [{ ...run, status: expected === "blocked" ? "passed" : expected }];
-      session.explorations[0]!.status = expected === "blocked" ? "incomplete" : "observed";
+      session.executions = [{ ...run, status: expected === "partial" ? "passed" : expected }];
+      session.explorations[0]!.status = expected === "partial" ? "incomplete" : "observed";
       session.findings = expected === "failed" ? [{ id: "F1", executionId: run.id, scenarioIds: ["S1"], category: "observed-failure", observed: "Wrong confirmation", suspectedCause: "", suggestedFix: "", source: [], evidence: [] }] : [];
       // A developer classification is retained as feedback, never erasing failed execution.
       if (expected === "failed") { feedback(session, "F1", "intended", "Fixture classification"); }
@@ -823,7 +843,44 @@ test("automatic reporting retains failed and incomplete selected coverage withou
       assert.equal(result.stage, "complete");
       assert.equal(ui.prompts.length, 0);
       assert.equal(result.findings.length, session.findings.length);
+      assert.equal(sessionExitCode(result), expected === "passed" ? 0 : expected === "failed" ? 1 : 2);
+      assert.deepEqual(passingTests(result).map(test => test.id), expected === "passed" || expected === "partial" ? ["T1"] : []);
+      if (expected === "partial") {
+        assert.deepEqual(coverageGaps(result), ["S1: exploration incomplete"]);
+        const report = await readFile(join(session.dir, "report.md"), "utf8");
+        assert.match(report, /Status: \*\*partial\*\*/);
+        assert.match(report, /T1: tests\/create.spec.ts/);
+        assert.match(report, new RegExp(`export --session ${session.id}`));
+        assert.match(report, /S1: exploration incomplete/);
+      }
     }
+
+    session.explorations[0]!.status = "observed";
+    session.executions = [run, { ...run, id: "rerun", status: "blocked" }];
+    assert.deepEqual(passingTests(session), []); // old success cannot mask an incomplete rerun
+    assert.deepEqual(coverageGaps(session), ["S1: no passing approved test"]);
+    session.executions = [{ ...run, revision: 0 }];
+    assert.deepEqual(passingTests(session), []); // old revisions cannot supply current coverage
+    session.executions = [run];
+    session.revisions[0]!.tests[0]!.approved = false;
+    assert.deepEqual(passingTests(session), []);
+    session.revisions[0]!.tests[0]!.approved = true;
+
+    // A runner can have usable passing files while other files are blocked or failed.
+    for (const status of ["blocked", "failed"] as const) {
+      session.executions = [{ ...run, status, checks: [{ testId: "T1", status: "passed" }] }];
+      await saveSession(session);
+      const result = await check({ session: session.id }, new WorkflowTerminal([]));
+      assert.equal(result.status, status === "failed" ? "failed" : "partial");
+      assert.deepEqual(passingTests(result).map(test => test.id), ["T1"]);
+    }
+
+    session.executions = [run];
+    session.gaps = ["AC1: some selected behavior remains uncovered."];
+    await saveSession(session);
+    const result = await check({ session: session.id }, new WorkflowTerminal([]));
+    assert.equal(result.status, "partial");
+    assert.deepEqual(result.gaps, session.gaps);
   } finally {
     await rm(session.dir, { recursive: true, force: true });
   }

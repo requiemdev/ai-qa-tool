@@ -8,8 +8,9 @@
 
 import { parseArgs } from "node:util";
 import pc from "picocolors";
+import { join } from "node:path";
 import { check, exportSession } from "./src/workflow.js";
-import { sessionExitCode } from "./src/session.js";
+import { sessionExitCode, passingTests } from "./src/session.js";
 
 const help = `agent-qa [check] [--repo <path>] [--base <ref>] [--url <localhost URL>] [--intent <description>]
   [--criteria <criterion> ...] [--change-type feature|bug-fix] [--include-local | --committed-only] [--deep] [--context <file> ...]
@@ -94,6 +95,15 @@ async function main(): Promise<void> {
     console.log(
       `\n${paint(pc.bold(result.status.toUpperCase()))}  ${result.dir}\n${pc.dim("Report:")} ${result.dir}/report.md`,
     );
+    console.log(result.reason);
+    const revision = result.revisions.at(-1);
+    if (revision) {
+      console.log(`Test files saved automatically: ${join(revision.dir, "tests")}`);
+    }
+    const passed = passingTests(result);
+    if (passed.length) {
+      console.log(`Passing tests available: ${passed.map((test) => test.id).join(", ")}`);
+    }
     process.exitCode = sessionExitCode(result);
     return;
   }
@@ -106,4 +116,3 @@ main().catch((error) => {
   );
   process.exitCode = 2;
 });
-

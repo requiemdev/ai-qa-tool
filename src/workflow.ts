@@ -29,6 +29,7 @@ import {
   saveSession,
   feedback,
   coverageGaps,
+  passingTests,
   isDeep,
 } from "./session.js";
 import type { Session } from "./session-types.js";
@@ -276,8 +277,8 @@ async function assessFindings(session: Session, ui: Terminal): Promise<void> {
 }
 
 /**
- * Determines and sets the final session outcome status ("passed", "failed", or "blocked")
- * based on the most recent execution outcomes for each runner and unresolved coverage gaps.
+ * Determines the final outcome from current executions and coverage gaps,
+ * retaining usable passing tests as partial coverage.
  *
  * @param session - Current QA session to finalize.
  */
@@ -297,16 +298,18 @@ function finishStatus(session: Session): void {
     coverageGaps(session).length ||
     unresolvedGaps(session).length
   ) {
-    session.status = "blocked";
+    session.status = passingTests(session).length ? "partial" : "blocked";
   } else {
     session.status = "passed";
   }
   session.reason =
     session.status === "passed"
       ? "Approved scope passed."
-      : session.status === "failed"
-        ? "Checks failed; original evidence and developer classifications retained."
-        : "Execution or approved coverage is incomplete; inspect report.";
+      : session.status === "partial"
+        ? "Passing tests are available for reuse; selected coverage or execution remains incomplete."
+        : session.status === "failed"
+          ? "Checks failed; original evidence and developer classifications retained."
+          : "Execution or approved coverage is incomplete; inspect report.";
 }
 
 /**

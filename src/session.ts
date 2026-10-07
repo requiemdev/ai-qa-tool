@@ -16,7 +16,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Session, Scenario } from "./session-types.js";
+import type { Session, Scenario, GeneratedTest } from "./session-types.js";
 
 import { safeRelative } from "./branch.js";
 import { record } from "./contracts.js";
@@ -205,6 +205,18 @@ export function sessionExitCode(session: Session): number {
   return 0;
 }
 
+/** Approved tests with passing evidence from their latest execution in the current revision. */
+export function passingTests(session: Session): GeneratedTest[] {
+  const revision = session.revisions.at(-1);
+  return revision?.tests.filter((test) => {
+    if (!test.approved || test.kind === "support") return false;
+    const run = session.executions.findLast(
+      (run) => run.revision === revision.number && run.phase === "generated" && run.testIds.includes(test.id),
+    );
+    return (run?.checks?.find((check) => check.testId === test.id)?.status ?? run?.status) === "passed";
+  }) ?? [];
+}
+
 /**
  * Identifies approved scenarios that have not been fully explored or lack passing tests.
  *
@@ -213,6 +225,7 @@ export function sessionExitCode(session: Session): number {
  */
 export function coverageGaps(session: Session): string[] {
   const revision = session.revisions.at(-1);
+  const passed = passingTests(session);
   return session.scenarios
     .filter(scenarioSelected)
     .flatMap((item) => {
@@ -226,16 +239,7 @@ export function coverageGaps(session: Session): string[] {
             test.kind !== "support" &&
             test.scenarioIds.includes(item.id),
         ) ?? [];
-      const executed = tests.some((test) =>
-        session.executions.some(
-          (run) =>
-            run.revision === revision?.number &&
-            run.phase === "generated" &&
-            run.testIds.includes(test.id) &&
-            (run.checks?.find((check) => check.testId === test.id)?.status ??
-              run.status) === "passed",
-        ),
-      );
+      const executed = tests.some((test) => passed.includes(test));
       const needsBrowser =
         !tests.length || tests.some((test) => test.kind === "browser");
       return [
@@ -313,12 +317,20 @@ export function renderReport(session: Session): string {
       )
       .join("\n") || "None.";
 
+  const passed = passingTests(session);
+  const revision = session.revisions.at(-1);
+  const passingText = passed.length
+    ? passed.map((test) => `- ${test.id}: ${test.path}`).join("\n") +
+      `\n\nExport selected tests: \`npm run qa -- export --session ${session.id}\`. Coverage gaps remain recorded.`
+    : "None.";
+
   return (
     `# QA session ${session.id}\n\n` +
     `Status: **${session.status}**. Stage: ${session.stage}. ${session.reason}\n\n` +
     `${session.summary}\n\n` +
     `Review depth: ${isDeep(session) ? "deep" : "standard"}.\n\n` +
-    `Skipped modules: ${isDeep(session) ? "none by default" : "generated unit/integration tests, independent AI test review, finding assessment/classification, automatic export"}.\n\n` +
+    `Skipped modules: ${isDeep(session) ? "none by default" : "generated unit/integration tests, independent AI test review, finding assessment/classification, automatic export to target repository"}.\n\n` +
+    (revision ? `Test files saved automatically: ${join(revision.dir, "tests")}\n\n` : "") +
     `## Source and assumptions\n\n` +
     `Repository: ${session.input.repo}\n\n` +
     `Target branch: ${session.context?.branch || "(detached/pending)"}; comparison reference: ${session.input.base}; head: ${session.context?.head ?? "pending"}; merge base: ${session.context?.mergeBase ?? "pending"}; local edits: ${session.input.local}.\n\n` +
@@ -334,6 +346,7 @@ export function renderReport(session: Session): string {
     `${explorationsText}\n\n` +
     `## Executions\n\n` +
     `${executionsText}\n\n` +
+    `## Passing tests available for reuse\n\n${passingText}\n\n` +
     `## Findings\n\n` +
     `${findingsText}\n\n` +
     `## Selection and developer feedback (append only)\n\n` +

@@ -167,7 +167,7 @@ export type Session = {
     | "findings"
     | "complete";
   /** Overall outcome status of the session. */
-  status: "active" | "passed" | "failed" | "blocked" | "cancelled";
+  status: "active" | "passed" | "partial" | "failed" | "blocked" | "cancelled";
   /** Initial CLI input options and parameters. */
   input: {
     depth?: "standard" | "deep";
