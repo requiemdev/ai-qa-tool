@@ -14,7 +14,7 @@
  * 6. execute: Executes approved tests against the running server via `execution.executeRevision`.
  * 7. findings: Synthesizes execution failures via `assessFindings` (using `codex.invokeCodex`)
  *    and interactive developer review via `interactive.reviewFindings`.
- * 8. complete: Computes final status via `finishStatus`, offers test export via `interactive.exportTests`.
+ * 8. complete: Computes final status via `finishStatus` and returns the saved session.
  */
 
 import { readFile } from "node:fs/promises";
@@ -30,8 +30,8 @@ import {
   feedback,
   coverageGaps,
   isDeep,
-  type Session,
 } from "./session.js";
+import type { Session } from "./session-types.js";
 import {
   Terminal,
   reviewScenarios,
@@ -44,9 +44,8 @@ import {
   explore,
   generate,
   reviewRevision,
-  validateSchema,
-  findingReviewSchema,
 } from "./stages.js";
+import { validateSchema, findingReviewSchema } from "./schemas.js";
 import { executeRevision } from "./execution.js";
 import { DEFAULT_TIMEOUT, invokeCodex } from "./codex.js";
 
@@ -68,8 +67,11 @@ export type CheckOptions = {
   base?: string;
   /** Whether to include local working tree modifications and untracked files. */
   local?: boolean;
+  /** Excludes local changes; cannot be combined with an explicit local selection. */
   committedOnly?: boolean;
+  /** Enables detailed review and existing-runner unit/integration coverage. */
   deep?: boolean;
+  /** Offers result revisions and reruns when reopening a completed standard session. */
   followup?: boolean;
   /** Explicit glob patterns or file paths to include as supporting context. */
   context?: string[];
@@ -116,13 +118,17 @@ async function collectInput(
   const repo = (
     await git(resolve(suppliedRepo), ["rev-parse", "--show-toplevel"])
   ).trim();
-  const base = options.base ?? (await baseCandidates(repo))[0] ??
+  const base =
+    options.base ??
+    (await baseCandidates(repo))[0] ??
     (await ui.required("Comparison reference (no fetch)"));
-  const url = localUrl(options.url ?? await ui.required("Running localhost URL"));
+  const url = localUrl(options.url ?? (await ui.required("Running localhost URL")));
   const intent = options.intent ?? (await ui.required("Feature/bug-fix description"));
-  if (!intent.trim()) { throw new Error("Intent cannot be empty."); }
+  if (!intent.trim()) {
+    throw new Error("Intent cannot be empty.");
+  }
   const criteria = options.criteria?.length ? options.criteria : [intent];
-  if (criteria.some(value => !value.trim())) {
+  if (criteria.some((value) => !value.trim())) {
     throw new Error("Acceptance criteria cannot be empty.");
   }
   const changeType = options.changeType ?? "feature";
@@ -324,7 +330,7 @@ function unresolvedGaps(session: Session): string[] {
 /**
  * Coordinates and executes the end-to-end interactive QA verification workflow.
  * Manages state persistence, pipeline stage transitions (context -> plan -> explore -> generate -> review -> execute -> findings -> complete),
- * cancellation signal handling, and final report / test export.
+ * cancellation signal handling, and final report persistence.
  *
  * @param options - Session configuration options.
  * @param ui - Terminal UI manager (defaults to a new Terminal instance).
@@ -397,7 +403,11 @@ export async function check(
           }
           session.assumptions.basis = "developer-confirmed";
         } else {
-          session.assumptions = { serverMatchesSource: true, repeatableData: true, basis: "assumed" };
+          session.assumptions = {
+            serverMatchesSource: true,
+            repeatableData: true,
+            basis: "assumed",
+          };
           ui.show("Assumed prerequisites: server represents the selected source; development data is repeatable/resettable. Browser isolation does not reset backend state.");
         }
         session.stage = "plan";
@@ -433,10 +443,23 @@ export async function check(
           await reviewScenarios(session, ui);
         } else {
           for (const item of session.scenarios) {
-            if (item.status !== "excluded") { item.status = "selected"; }
+            if (item.status !== "excluded") {
+              item.status = "selected";
+            }
           }
-          ui.show(session.scenarios.map(item => `${item.id} [${item.status}] ${item.title} (${item.criteria.join(", ")})\n  ${item.steps.join(" → ")}\n  Expect: ${item.expected}`).join("\n\n"));
-          feedback(session, "plan", "automatically-selected", "Displayed scenarios selected automatically; this is not developer approval.");
+          ui.show(
+            session.scenarios
+              .map((item) =>
+                `${item.id} [${item.status}] ${item.title} (${item.criteria.join(", ")})\n  ${item.steps.join(" → ")}\n  Expect: ${item.expected}`,
+              )
+              .join("\n\n"),
+          );
+          feedback(
+            session,
+            "plan",
+            "automatically-selected",
+            "Displayed scenarios selected automatically; this is not developer approval.",
+          );
           if (!session.scenarios.length) {
             const limitation = "No browser-verifiable behavior identified. Standard review cannot verify this change; use --deep for existing-runner unit/integration coverage.";
             session.gaps.push(limitation);
@@ -588,9 +611,6 @@ export async function check(
         finishStatus(session);
         session.stage = "complete";
         await saveSession(session);
-        if (await ui.confirm("Export selected approved tests")) {
-          await exportTests(session, ui);
-        }
         return session;
       }
     }

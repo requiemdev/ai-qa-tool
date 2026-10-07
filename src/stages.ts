@@ -17,166 +17,30 @@ import { randomUUID } from "node:crypto";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { invokeCodex } from "./codex.js";
-import { record } from "./contracts.js";
+import {
+  planSchema,
+  explorationSchema,
+  testsSchema,
+  reviewSchema,
+  validateSchema,
+} from "./schemas.js";
 import { excluded } from "./context.js";
 import { safeRelative } from "./branch.js";
 import {
   sha256,
   isDeep,
   scenarioSelected,
-  type Session,
-  type Scenario,
-  type GeneratedTest,
-  type Exploration,
 } from "./session.js";
+import type { Session, Scenario, GeneratedTest, Exploration } from "./session-types.js";
 
-const string = { type: "string" };
-const strings = { type: "array", items: string };
-const gaps = {
-  type: "array",
-  description:
-    "Only concrete missing acceptance behavior or prerequisites that prevent the selected checks. Use an empty array when none. Never list pending runtime verification, deliberately skipped modules, unchanged helper coverage, absence of unnecessary backend services, summaries, or progress messages.",
-  items: string,
-};
-const object = (properties: Record<string, object>) => ({
-  type: "object",
-  additionalProperties: false,
-  required: Object.keys(properties),
-  properties,
-});
-const array = (items: object) => ({ type: "array", items });
-
-/**
- * JSON Schema defining the structured output format for the QA analysis and planning stage.
- */
-export const planSchema = object({
-  summary: string,
-  conflicts: strings,
-  gaps,
-  scenarios: array(
-    object({
-      title: string,
-      criteria: strings,
-      kind: {
-        type: "string",
-        enum: ["normal", "boundary", "error", "regression"],
-      },
-      steps: strings,
-      expected: string,
-    }),
-  ),
-});
-
-/**
- * JSON Schema defining the structured output format for interactive browser exploration.
- */
-export const explorationSchema = object({
-  flows: array(
-    object({
-      scenarioId: string,
-      status: { type: "string", enum: ["observed", "failed", "incomplete"] },
-      steps: strings,
-      observed: string,
-      evidence: strings,
-    }),
-  ),
-  gaps,
-});
-
-/**
- * JSON Schema defining the structured output format for generated test suites.
- */
-export const testsSchema = object({
-  tests: array(
-    object({
-      id: string,
-      path: string,
-      kind: {
-        type: "string",
-        enum: ["browser", "unit", "integration", "support"],
-      },
-      runner: {
-        type: "string",
-        enum: ["playwright", "vitest", "jest", "node"],
-      },
-      scenarioIds: strings,
-      purpose: string,
-      expected: string,
-      content: string,
-      supportIds: strings,
-    }),
-  ),
-  gaps,
-});
-
-/**
- * JSON Schema defining the structured output format for independent test reviews.
- */
-export const reviewSchema = object({
-  assessment: string,
-  issues: strings,
-  gaps,
-});
-
-/**
- * JSON Schema defining independent assessment of execution findings.
- */
-export const findingReviewSchema = object({
-  findings: array(
-    object({
-      id: string,
-      suspectedCause: string,
-      suggestedFix: string,
-      source: strings,
-    }),
-  ),
-});
-
-/**
- * Recursively validates an untrusted AI response against a JSON Schema definition,
- * verifying types, required object fields, and enum values.
- *
- * @param value - Untrusted parsed JSON response.
- * @param schema - Schema definition to validate against.
- * @param path - Current property path for error diagnostics.
- * @throws {Error} If value does not strictly adhere to the schema.
- */
-export function validateSchema(
-  value: unknown,
-  schema: object,
-  path = "response",
-): void {
-  const definition = schema as {
-    type?: string;
-    enum?: unknown[];
-    properties?: Record<string, object>;
-    items?: object;
-  };
-  if (definition.enum && !definition.enum.includes(value)) {
-    throw new Error(`Malformed AI ${path}: unexpected value.`);
-  }
-  if (definition.type === "object") {
-    if (
-      !record(value) ||
-      Object.keys(value).sort().join(",") !==
-        Object.keys(definition.properties!).sort().join(",")
-    ) {
-      throw new Error(`Malformed AI ${path}: object fields mismatch.`);
-    }
-    for (const [key, child] of Object.entries(definition.properties!)) {
-      validateSchema(value[key], child, `${path}.${key}`);
-    }
-  } else if (definition.type === "array") {
-    if (!Array.isArray(value)) {
-      throw new Error(`Malformed AI ${path}: expected array.`);
-    }
-    value.forEach((item, i) => {
-      validateSchema(item, definition.items!, `${path}[${i}]`);
-    });
-  } else if (typeof value !== definition.type) {
-    throw new Error(`Malformed AI ${path}: expected ${definition.type}.`);
-  }
-}
+export {
+  planSchema,
+  explorationSchema,
+  testsSchema,
+  reviewSchema,
+  findingReviewSchema,
+  validateSchema,
+} from "./schemas.js";
 
 function aiOptions(
   session: Session,
@@ -185,12 +49,13 @@ function aiOptions(
 ) {
   return {
     ...(session.input.model ? { model: session.input.model } : {}),
-    reasoning: isDeep(session) ? "xhigh" as const : "medium" as const,
+    reasoning: isDeep(session) ? ("xhigh" as const) : ("medium" as const),
     timeout: session.input.timeout,
     signal,
     progress,
   };
 }
+
 /**
  * Analyzes repository diffs, commit intent, and acceptance criteria to produce
  * a structured plan of candidate test scenarios.
@@ -268,14 +133,16 @@ export async function explore(
   progress: (text: string) => void,
 ): Promise<void> {
   const dir = join(session.dir, "exploration-" + Date.now());
-  const approved = session.scenarios.filter(
-    scenarioSelected,
-  );
-  if (!approved.length) { return; }
-  const ux = isDeep(session) ? await readFile(
-    join(dirname(dirname(session.dir)), "roles", "ui-ux-tester.md"),
-    "utf8",
-  ) : "Cover only the selected changed behavior and relevant regression; no broad UX expansion.";
+  const approved = session.scenarios.filter(scenarioSelected);
+  if (!approved.length) {
+    return;
+  }
+  const ux = isDeep(session)
+    ? await readFile(
+        join(dirname(dirname(session.dir)), "roles", "ui-ux-tester.md"),
+        "utf8",
+      )
+    : "Cover only the selected changed behavior and relevant regression; no broad UX expansion.";
   try {
     const result = await invokeCodex({
       ...aiOptions(session, signal, progress),
@@ -340,12 +207,25 @@ export function validateTests(
     gaps: string[];
   };
   if (!response.tests.length) {
-    throw new Error(isDeep(session) ? "No tests generated." : "No browser tests generated. Browser-verifiable coverage is incomplete; use --deep for existing-runner unit/integration coverage.");
+    throw new Error(
+      isDeep(session)
+        ? "No tests generated."
+        : "No browser tests generated. Browser-verifiable coverage is incomplete; use --deep for existing-runner unit/integration coverage.",
+    );
   }
   const ids = new Set<string>();
   const paths = new Set<string>();
   const tests = response.tests.map((item) => {
-    if (!isDeep(session) && (item.kind === "unit" || item.kind === "integration" || item.runner !== "playwright")) {
+    const runner =
+      !isDeep(session) && item.kind === "support"
+        ? "playwright"
+        : item.runner;
+    if (
+      !isDeep(session) &&
+      (item.kind === "unit" ||
+        item.kind === "integration" ||
+        (item.kind !== "support" && runner !== "playwright"))
+    ) {
       throw new Error("Standard review supports browser tests only; use --deep for unit/integration coverage.");
     }
     safeRelative(item.path);
@@ -389,14 +269,14 @@ export function validateTests(
     }
     if (
       item.kind === "browser"
-        ? item.runner !== "playwright"
+        ? runner !== "playwright"
         : item.kind !== "support" &&
-          (item.runner === "playwright" ||
+          (runner === "playwright" ||
             !session.context?.runners.some(
-              (runner) => runner.kind === item.runner,
+              (detected) => detected.kind === runner,
             ))
     ) {
-      throw new Error(`Unsupported test runner: ${item.runner}`);
+      throw new Error(`Unsupported test runner: ${runner}`);
     }
     if (
       item.kind !== "support" &&
@@ -410,33 +290,56 @@ export function validateTests(
     }
     if (
       item.kind !== "support" &&
-      (!/\b(?:test|it)(?:\.(?:each|concurrent))?\s*\(/.test(item.content) ||
-        !/\b(?:expect\s*\(|assert(?:\.|\s*\())/.test(item.content))
+      !/\b(?:test|it)(?:\.(?:each|concurrent))?\s*\(/.test(item.content)
     ) {
       throw new Error(
         "Generated tests require test declarations and behavior assertions.",
       );
     }
-    if (
-      item.kind === "browser" &&
-      (!/\bexpect\s*\(/.test(item.content) || !/\btest\s*\(/.test(item.content))
-    ) {
-      throw new Error(
-        "Browser specs require ordinary test declarations and behavior assertions.",
-      );
-    }
-    return { ...item, sha256: sha256(item.content), approved: false };
+    return {
+      ...item,
+      runner,
+      sha256: sha256(item.content),
+      approved: false,
+    };
   });
   for (const item of tests) {
+    const missing = item.supportIds.filter(
+      (id) =>
+        !tests.some(
+          (support) => support.id === id && support.kind === "support",
+        ),
+    );
+    if (missing.length) {
+      throw new Error(
+        `Unknown required test support file(s) for ${item.id}: ${missing.join(", ")}.`,
+      );
+    }
+  }
+  const assertion = /\b(?:expect\s*\(|assert(?:\.|\s*\())/;
+  const hasAssertion = (
+    item: GeneratedTest,
+    seen = new Set<string>(),
+  ): boolean => {
+    if (assertion.test(item.content)) return true;
+    if (seen.has(item.id)) return false;
+    const next = new Set(seen).add(item.id);
+    return item.supportIds.some((id) => {
+      const support = tests.find((candidate) => candidate.id === id);
+      return support?.kind === "support" && hasAssertion(support, next);
+    });
+  };
+  for (const item of tests) {
     if (
-      item.supportIds.some(
-        (id) =>
-          !tests.some(
-            (support) => support.id === id && support.kind === "support",
-          ),
-      )
+      item.kind !== "support" &&
+      (!hasAssertion(item) ||
+        (item.kind === "browser" && !/\btest\s*\(/.test(item.content)))
     ) {
-      throw new Error("Unknown required test support file.");
+      throw new Error(
+        item.kind === "browser"
+          ? "Browser specs require ordinary test declarations and behavior assertions."
+          : "Generated tests require test declarations and behavior assertions.",
+      );
     }
   }
   return { tests, gaps: response.gaps };
@@ -469,7 +372,25 @@ export async function generate(
     schema: testsSchema,
     prompt: `${isDeep(session) ? "Generate browser and existing-runner unit/integration coverage as appropriate." : "Generate ONLY browser tests and their Playwright support files. Unit/integration generation and existing baselines are skipped at standard depth; record a limitation and suggest --deep if acceptance behavior cannot be verified in a browser. Intentionally skipped unit/integration generation and existing baselines are NOT gaps: the tool reports skipped modules separately. Unchanged source helpers and existing tests are supporting context, not extra acceptance scope. Include gaps ONLY for selected acceptance criteria that cannot be tested or actual missing prerequisites, otherwise return gaps: []. These scope instructions override any broader guidance below."}\nThe tool supplies its own Playwright runner/config/dependency; target-repo browser setup is unnecessary. Report only missing approved coverage or prerequisites, not routine pending execution. Generate ordinary reviewable test files for ALL approved scenarios, without a fixed test-count ceiling. ${isDeep(session) ? "Unit-only scenarios must be covered through their existing runner; do not invent browser flows for them." : "Only browser-verifiable behavior is in execution scope; preserve uncovered criteria as gaps."} Never generate a test that clicks, activates, opens, or navigates to an outbound or external link. Test external-link behavior from the localhost page only by inspecting attributes and activation semantics such as href, target, and rel. Browser tests import {test,expect} from '@playwright/test', navigate to ${session.input.url}, use semantic locators observed at the correct state, and assert developer expected behavior. Each file should isolate one scenario so selection/coverage is clear. Dynamic dialog and post-navigation locators are valid for the localhost application only. ${isDeep(session) ? "Unit/integration tests use ONLY detected existing runners and conventions and import source via relative paths at the proposed destination." : "Do not generate unit/integration tests."} All generated destinations must be NEW paths absent from context.tree; do not copy or replace an existing test. ${isDeep(session) ? "Existing tests are executed separately as a baseline." : "Existing runner baselines are skipped."} Support files must be test-only, referenced by supportIds. No app source/configuration changes. Do not weaken expectations to match observed bugs. Report gaps for unobserved selectors, missing fixtures/services, or unsupported setups. Feedback produces a NEW revision.\n${JSON.stringify({ input: session.input, context: session.context, scenarios: session.scenarios, exploration: session.explorations, previous: session.revisions.at(-1)?.tests, developerFeedback: session.feedback, feedback })}`,
   });
-  const generated = validateTests(result, session);
+  let generated: { tests: GeneratedTest[]; gaps: string[] };
+  try {
+    generated = validateTests(result, session);
+  } catch (error) {
+    if (isDeep(session)) {
+      throw error;
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    progress("Generated tests failed validation; retrying with corrective feedback.");
+    const retry = await invokeCodex({
+      ...aiOptions(session, signal, progress),
+      dir: join(dir, "generation-retry"),
+      role: "test-automator",
+      schema: testsSchema,
+      prompt: `Replace the previous response with a complete standard browser-only test set. Local validation rejected it with: ${reason}. Every supportIds entry must match exactly one returned item whose kind is "support"; include every imported support file in tests, and ensure the support path matches the import path. Keep browser and support files Playwright-compatible, and do not generate unit or integration tests. Return only schema-conforming JSON.
+${JSON.stringify({ input: session.input, scenarios: session.scenarios, exploration: session.explorations, previous: result })}`,
+    });
+    generated = validateTests(retry, session);
+  }
   await mkdir(join(dir, "tests"), { recursive: true, mode: 0o700 });
   for (const item of generated.tests) {
     const path = join(dir, "tests", item.path);

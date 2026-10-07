@@ -66,6 +66,8 @@ The default displays scope, assumed prerequisites, complete generated source, ha
 
 With `--deep`, review generated tests with `source`, `edit`, `regenerate`, `approve`, or `reject`. Enter test IDs to approve a subset, or explicitly enter `all`. Required support files are included in that approval. Edits use `VISUAL` or `EDITOR`; configure an editor that waits for completion, for example `EDITOR='code --wait'`. Without an editor, the CLI prints a new revision path for you to edit and save. Every edit or regeneration creates a new retained revision, requiring fresh approval; deep sessions also perform independent review. Files changed after approval block execution.
 
+Each generated revision writes its tests and required support files separately under the session folder at `revision-*/tests/`. Selecting `finish` saves the final report and ends the guided flow; copying tests into the target repository remains an explicit `export` command.
+
 Deep results retain original observations. Classify each finding as `bug`, `intended`, `invalid`, or `unresolved`, with a reason. Classification adds feedback and never changes the executed files or erases a failed run. `revise-tests`, `revise-plan`, and `rerun` require another review/approval. Reported gaps can be explicitly excluded from accepted scope with a recorded reason; uncovered approved scenarios still prevent a passing outcome.
 
 ## Reopen and export
@@ -112,6 +114,30 @@ npx playwright show-trace /absolute/path/to/trace.zip
 ```
 
 Live checks need process/network permissions and use your signed-in Codex account. The fixtures have no authentication/backend services. Reports and traces can contain source, application text, and sensitive browser data; keep `.agent-qa/` private.
+
+## Code organization
+
+The CLI delegates to `src/workflow.ts`, which coordinates the persisted QA stages.
+Modules separate shared data definitions from the operations that use them:
+
+| Module | Responsibility |
+| --- | --- |
+| `session-types.ts` | Serializable scenarios, generated tests, exploration, executions, findings, feedback, and session state. |
+| `context-types.ts` | Git changes, source context, branch metadata, and detected test runners. |
+| `session.ts` | Session persistence, feedback history, coverage accounting, reports, and artifact path validation. |
+| `context.ts` / `branch.ts` | Safe source reads, Git inspection, runner detection, and source snapshots. |
+| `schemas.ts` | Structured AI response schemas and strict recursive validation. |
+| `stages.ts` | AI analysis, browser exploration, test generation, and independent review. |
+| `interactive.ts` | Terminal prompts, scenario/test/finding review, editing, and export. |
+| `execution.ts` | Approved-file validation, runner invocation, baselines, and execution persistence. |
+| `runner-results.ts` | Pure runner-result classification, per-file outcomes, and failure summaries. |
+| `codex.ts` / `process.ts` | Codex configuration and subprocess lifecycle management. |
+| `setup.ts` / `node-reporter.ts` | Playwright preflight and native Node test event reporting. |
+
+Import shared types from the type modules and AI schemas from `schemas.ts` for new code.
+The original modules re-export their existing public types, schemas, and result helpers
+so existing imports remain valid. Keep model field documentation alongside its type;
+keep operational documentation alongside the function that implements it.
 
 ## References and attribution
 

@@ -30,9 +30,8 @@ import {
   saveSession,
   sha256,
   containedPath,
-  type Session,
-  type Scenario,
 } from "./session.js";
+import type { Session, Scenario } from "./session-types.js";
 import { selectSupport } from "./execution.js";
 import { validateTests } from "./stages.js";
 
@@ -478,13 +477,17 @@ export async function reviewTests(
     }
     if (!isDeep(session)) {
       ui.show(`Scope: ${session.input.intent}\n${session.input.criteria.map((text, i) => `AC${i + 1}: ${text}`).join("\n")}\nComparison reference: ${session.input.base}; target branch: ${session.context?.branch || "(detached/pending)"}; local work: ${session.input.local ? "included" : "excluded"}.\nPrerequisites (${session.assumptions.basis ?? "assumed"}): matching server and repeatable development data. Required support is included in Run all.`);
-      for (const item of revision.tests) { ui.show(`--- ${item.path} ---\n${item.content}`); }
+      for (const item of revision.tests) {
+        ui.show(`--- ${item.path} ---\n${item.content}`);
+      }
     }
     const action = (await ui.ask(
       isDeep(session) ? "Tests: source / edit / regenerate / approve / reject" : "Run all / inspect / edit / regenerate / cancel (approves displayed files, required support, and execution as trusted local code)",
       isDeep(session) ? "source" : "",
     )).toLowerCase();
-    if (action === "cancel") { throw new Error("Cancelled."); }
+    if (action === "cancel") {
+      throw new Error("Cancelled.");
+    }
     if (action === "source" || action === "inspect") {
       const id = await ui.required("Test ID (or all)", "all");
       for (const item of revision.tests.filter(
@@ -581,7 +584,10 @@ export async function reviewFindings(
     ui.show(
       `${pc.bold(pc.red("Finding " + finding.id))}: ${pc.bold(finding.category)}\n${finding.observed}\nEvidence: ${finding.evidence.join(", ")}\nSuspected cause: ${finding.suspectedCause || "Unknown"}\nSuggested fix: ${finding.suggestedFix || "Inspect evidence"}`,
     );
-    if (!classify || session.feedback.some((item) => item.targetId === finding.id)) {
+    if (
+      !classify ||
+      session.feedback.some((item) => item.targetId === finding.id)
+    ) {
       continue;
     }
     let decision: string;
@@ -715,4 +721,3 @@ export async function exportTests(
   );
   await saveSession(session);
 }
-

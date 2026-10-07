@@ -40,6 +40,7 @@ import {
   Terminal,
 } from "../src/interactive.js";
 import { check } from "../src/workflow.js";
+import { browserActionSetPrompt, browserTools } from "../src/codex.js";
 
 const input = {
   repo: "/tmp",
@@ -97,6 +98,14 @@ const generated = {
     "import { test, expect } from '@playwright/test'; test('Create', async ({page}) => { await expect(page.getByRole('status')).toHaveText('Created Ada'); });\n",
   supportIds: [],
 };
+
+test("browser prompts match the enabled action set", () => {
+  for (const tool of browserTools) {
+    assert.match(browserActionSetPrompt, new RegExp(`\\b${tool}\\b`));
+  }
+  assert.match(browserActionSetPrompt, /only those exact tool names/);
+  assert.match(browserActionSetPrompt, /hover, drag, evaluate, arbitrary code/);
+});
 
 test("committed branch selection excludes dirty imports and includes HTML/config/renames/deletes; bases use priority order", async () => {
   const repo = await mkdtemp(join(tmpdir(), "qa-branch-"));
@@ -493,6 +502,37 @@ test("malformed AI output, unsupported setups and incomplete results never becom
   }
 });
 
+test("standard browser validation accepts delegated Playwright support assertions", async () => {
+  const session = await newSession({ ...input, depth: "standard" });
+  try {
+    session.scenarios = [scenario];
+    const browser = {
+      ...generated,
+      content:
+        "import { test } from '@playwright/test'; test('delegated', () => { assertLayout(); });\n",
+      supportIds: ["H1"],
+    };
+    const support = {
+      ...generated,
+      id: "H1",
+      path: "tests/helper.ts",
+      kind: "support",
+      runner: "node",
+      scenarioIds: [],
+      content:
+        "import { expect } from '@playwright/test'; export function assertLayout() { expect(true).toBe(true); }\n",
+      supportIds: [],
+    };
+    const result = validateTests(
+      { tests: [browser, support], gaps: [] },
+      session,
+    );
+    assert.equal(result.tests.find((item) => item.id === "H1")?.runner, "playwright");
+  } finally {
+    await rm(session.dir, { recursive: true, force: true });
+  }
+});
+
 test("export requires selected approved files, includes support, previews collisions and protects symlink escapes", async () => {
   const repo = await mkdtemp(join(tmpdir(), "qa-export-"));
   const session = await newSession({ ...input, repo });
@@ -720,7 +760,7 @@ writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(result));
       assert.equal(changed.status, "blocked");
       assert.match(changed.reason, /changed since review/);
     }
-    const deepUi = new WorkflowTerminal(["yes", "yes", "approve", "source", "all", "approve", "all", "yes", "finish", "no"]);
+    const deepUi = new WorkflowTerminal(["yes", "yes", "approve", "source", "all", "approve", "all", "yes", "finish"]);
     const deep = await check({ repo, url: input.url, intent: "Show After", deep: true, local: false }, deepUi);
     sessions.push(deep.dir);
     assert.equal(deep.input.depth, "deep");
@@ -730,6 +770,13 @@ writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(result));
     const deepAnalysis = (await readdir(deep.dir)).find(name => name.startsWith("analysis-"))!;
     assert.equal(JSON.parse(await readFile(join(deep.dir, deepAnalysis, "invocation.json"), "utf8")).reasoningEffort, "xhigh");
     assert.equal(deep.status, "blocked");
+    assert.equal(deepUi.prompts.at(-1), "Results: finish / revise-tests / revise-plan / rerun");
+    assert.equal(deepUi.prompts.some((prompt) => prompt.includes("Export selected approved tests")), false);
+    const revision = deep.revisions.at(-1)!;
+    assert.equal(
+      await readFile(join(revision.dir, "tests", revision.tests[0]!.path), "utf8"),
+      revision.tests[0]!.content,
+    );
     const limitedUi = new WorkflowTerminal([]);
     const limited = await check({ repo, url: input.url, intent: "unit-only fixture", committedOnly: true }, limitedUi);
     sessions.push(limited.dir);
