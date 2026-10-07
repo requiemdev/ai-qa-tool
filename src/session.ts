@@ -16,10 +16,11 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Session, Scenario, GeneratedTest } from "./session-types.js";
+import type { Session, Scenario, GeneratedTest, Improvement } from "./session-types.js";
 
 import { safeRelative } from "./branch.js";
 import { record } from "./contracts.js";
+import { validateImprovementCandidate } from "./schemas.js";
 
 export type {
   Session,
@@ -28,6 +29,8 @@ export type {
   Exploration,
   ExecutionResult,
   Finding,
+  Improvement,
+  ImprovementCandidate,
   Feedback,
 } from "./session-types.js";
 
@@ -83,6 +86,7 @@ export async function newSession(input: Session["input"]): Promise<Session> {
     revisions: [],
     executions: [],
     findings: [],
+    improvements: [],
     feedback: [],
     exports: [],
     reason: "",
@@ -161,6 +165,24 @@ export async function loadSession(id: string): Promise<Session> {
     throw new Error("Invalid or unsupported session record.");
   }
   const session = value as unknown as Session;
+  if (value.improvements === undefined) {
+    session.improvements = [];
+  } else {
+    try {
+      if (!Array.isArray(value.improvements)) throw new Error("Expected array.");
+      const ids = new Set<string>();
+      for (const item of value.improvements) {
+        if (!record(item) || typeof item.id !== "string" || !item.id.trim() || ids.has(item.id) || !["pending", "supported", "unverified", "dismissed"].includes(String(item.assessment)) || typeof item.assessmentReason !== "string" || (item.assessment !== "pending" && !item.assessmentReason.trim())) {
+          throw new Error("Malformed improvement record.");
+        }
+        ids.add(item.id);
+        const { id: _id, assessment: _assessment, assessmentReason: _reason, ...candidate } = item;
+        validateImprovementCandidate(candidate, session.scenarios.map((scenario) => scenario.id), session.context?.files ?? []);
+      }
+    } catch {
+      throw new Error("Invalid or unsupported session improvement record.");
+    }
+  }
   session.dir = dir;
   return session;
 }
@@ -251,6 +273,11 @@ export function coverageGaps(session: Session): string[] {
     });
 }
 
+/** Shared advisory detail for terminal results and Markdown reports. */
+export function formatImprovement(item: Improvement): string {
+  return `${item.title} (${item.priority}; ${item.assessment})\nObservation: ${item.observed}\nExpected benefit (inferred): ${item.benefit}\nSuggested change: ${item.suggestedChange}\nAssessment: ${item.assessmentReason}\nSource: ${item.source.join(", ") || "None cited."}\nEvidence: ${item.evidence.join(", ")}`;
+}
+
 /**
  * Renders a complete Markdown summary report of the session, including
  * acceptance scope, exploration findings, execution history, and developer feedback.
@@ -301,6 +328,10 @@ export function renderReport(session: Session): string {
       )
       .join("\n") || "None recorded.";
 
+  const failuresSummary = session.findings.map((item) =>
+    `- ${item.id} (${item.category}): ${item.observed.split("\n")[0]}\n  Suspected cause: ${item.suspectedCause || "Unknown."}\n  Suggested fix: ${item.suggestedFix || "Inspect retained evidence."}\n  Evidence: ${item.evidence.join(", ")}`,
+  ).join("\n\n") || "None recorded.";
+
   const feedbackText =
     session.feedback
       .map(
@@ -324,12 +355,25 @@ export function renderReport(session: Session): string {
       `\n\nExport selected tests: \`npm run qa -- export --session ${session.id}\`. Coverage gaps remain recorded.`
     : "None.";
 
+  const advisories = (states: Improvement["assessment"][]) => session.improvements
+    .filter((item) => states.includes(item.assessment))
+    .map((item) => `- ${item.id}: ${formatImprovement(item).replaceAll("\n", "\n  ")}`)
+    .join("\n\n");
+  const supportedText = advisories(["supported"]) || (session.improvements.length
+    ? "No supported recommendations. See unverified candidates and detailed history."
+    : "No improvements were identified within the inspected scope.");
+
   return (
     `# QA session ${session.id}\n\n` +
     `Status: **${session.status}**. Stage: ${session.stage}. ${session.reason}\n\n` +
-    `${session.summary}\n\n` +
+    `Selected scope: ${session.input.intent}\n\n` +
+    `## Observed failures\n\n${failuresSummary}\n\n` +
+    `## Potential improvements\n\n${supportedText}\n\n` +
+    `## Unverified improvement candidates\n\n${advisories(["pending", "unverified"]) || "None."}\n\n` +
+    `## Coverage limitations\n\n${gapsText}\n\n` +
+    `## Passing checks available for reuse\n\n${passingText}\n\n` +
     `Review depth: ${isDeep(session) ? "deep" : "standard"}.\n\n` +
-    `Skipped modules: ${isDeep(session) ? "none by default" : "independent AI test review, finding assessment/classification, automatic export to target repository"}.\n\n` +
+    `Skipped modules: ${isDeep(session) ? "none by default" : "independent AI test review, mandatory finding classification, automatic export to target repository"}.\n\n` +
     (revision ? `Test files saved automatically: ${join(revision.dir, "tests")}\n\n` : "") +
     `## Source and assumptions\n\n` +
     `Repository: ${session.input.repo}\n\n` +
@@ -338,17 +382,15 @@ export function renderReport(session: Session): string {
     `## Acceptance scope\n\n` +
     `${criteriaText}\n\n` +
     `${scenariosText}\n\n` +
+    `## Planning summary\n\n${session.summary}\n\n` +
     `## Excluded files\n\n${session.context?.skipped.join("\n") || "None."}\n\n` +
     `## Uncommitted work\n\n${session.context?.localChanges?.map(item => item.status + " " + item.path).join("\n") || "None recorded."}\n\nEligible untracked selection: ${session.input.local ? "included" : "excluded (--committed-only)"}; untracked paths: ${session.context?.untracked.join(", ") || "none"}.\n\n` +
-    `## Coverage gaps\n\n` +
-    `${gapsText}\n\n` +
     `## Exploration\n\n` +
     `${explorationsText}\n\n` +
     `## Executions\n\n` +
     `${executionsText}\n\n` +
-    `## Passing tests available for reuse\n\n${passingText}\n\n` +
-    `## Findings\n\n` +
-    `${findingsText}\n\n` +
+    `## Detailed failure history\n\n${findingsText}\n\n` +
+    `## Dismissed improvement history\n\n${advisories(["dismissed"]) || "None."}\n\n` +
     `## Selection and developer feedback (append only)\n\n` +
     `${feedbackText}\n\n` +
     `## Accepted exports\n\n` +

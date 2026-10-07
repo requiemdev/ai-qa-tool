@@ -124,6 +124,24 @@ export type Finding = {
   evidence: string[];
 };
 
+/** Evidence-grounded advisory, independent of execution failures. */
+export type ImprovementCandidate = {
+  scenarioIds: string[];
+  title: string;
+  observed: string;
+  benefit: string;
+  suggestedChange: string;
+  priority: "low" | "medium" | "high";
+  source: string[];
+  evidence: string[];
+};
+
+export type Improvement = ImprovementCandidate & {
+  id: string;
+  assessment: "pending" | "supported" | "unverified" | "dismissed";
+  assessmentReason: string;
+};
+
 /**
  * Automatic selection or developer review recorded on a session entity.
  */
@@ -214,6 +232,8 @@ export type Session = {
   executions: ExecutionResult[];
   /** Observed test failures and environment findings. */
   findings: Finding[];
+  /** Advisory observations retained even when later dismissed. */
+  improvements: Improvement[];
   /** Append-only log of developer review feedback. */
   feedback: Feedback[];
   /** Tests exported into the destination repository. */

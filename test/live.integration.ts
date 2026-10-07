@@ -19,8 +19,14 @@ import { executeRevision } from "../src/execution.js";
 
 class FixtureReview extends Terminal {
   prompts: string[] = [];
+  stages: { label: string; elapsedMs: number }[] = [];
   constructor() {
     super(new PassThrough());
+  }
+  override async working<T>(label: string, task: (progress: (text: string) => void) => Promise<T>): Promise<T> {
+    const started = Date.now();
+    try { return await super.working(label, task); }
+    finally { this.stages.push({ label, elapsedMs: Date.now() - started }); }
   }
   private sourceShown = false;
   private sessionId = "";
@@ -41,7 +47,12 @@ class FixtureReview extends Terminal {
     this.prompts.push(prompt);
     console.log("FIXTURE REVIEW: " + prompt);
     if (prompt.startsWith("Run all")) {
-      assert(this.sourceShown);
+      const session = await loadSession(this.sessionId);
+      for (const file of session.revisions.at(-1)!.tests) {
+        assert.equal(await readFile(join(session.revisions.at(-1)!.dir, "tests", file.path), "utf8"), file.content);
+        assert.equal(sha256(file.content), file.sha256);
+        if (file.kind !== "support") assert.match(file.content, /(?:expect\(|assert\.)/);
+      }
       return "run all";
     }
     if (
@@ -123,7 +134,7 @@ class FixtureReview extends Terminal {
 }
 
 test(
-  "live Codex fluid session records prompt/stage/time metrics and detects unchanged-assertion regression",
+  "live Codex normal session discovers an improvement alongside working flow and reproducible failure",
   { timeout: 1_200_000 },
   async () => {
     const previous = process.env.AGENT_QA_RESUME_SESSION
@@ -156,24 +167,25 @@ test(
       git("commit", "-qm", "baseline");
       git("checkout", "-qb", "create-item");
     }
-    const html = `<h1>Items</h1><button onclick="document.querySelector('dialog').showModal()">Create item</button><dialog aria-label="Create item"><form onsubmit="event.preventDefault(); document.querySelector('output').textContent='Created '+document.querySelector('input').value; document.querySelector('dialog').close()"><label>Name<input required></label><button>Create</button></form></dialog><output aria-label="Result"></output>`;
+    const html = `<h1>Items</h1>
+<button onclick="document.querySelector('dialog').showModal()">Create item</button>
+<dialog aria-label="Create item" style="width:1100px;max-width:none">
+<form onsubmit="event.preventDefault(); document.querySelector('output').textContent='Created '+document.querySelector('input').value; document.querySelector('dialog').close()">
+<label>Name<input></label><button>Create</button>
+</form></dialog>
+<output aria-label="Result"></output>`;
     if (!previous) {
       await writeFile(join(repo, "index.html"), html);
       git("add", ".");
       git(
         "commit",
         "-qm",
-        "Create item dialog with required Name and post-submit confirmation",
+        "Create item dialog and post-submit confirmation",
       );
     }
-    let regression = false;
     const server = createServer((_req, res) => {
       res.setHeader("Content-Type", "text/html");
-      res.end(
-        regression
-          ? html.replace("textContent='Created '", "textContent='REGRESSION '")
-          : html,
-      );
+      res.end(html);
     });
     server.listen(
       previous ? Number(new URL(previous.input.url).port) : 0,
@@ -208,22 +220,22 @@ test(
             },
         ui,
       );
-      assert.equal(
-        session.status,
-        "passed",
-        session.reason + "\n" + JSON.stringify(session.executions),
-      );
-      assert.equal(sessionExitCode(session), 0);
+      assert.equal(session.status, "failed", session.reason + "\n" + JSON.stringify(session.executions));
+      assert.equal(sessionExitCode(session), 1);
+      assert(session.improvements.some((item) => item.assessment === "supported"), JSON.stringify(session.improvements));
+      assert(session.findings.some((item) => item.category === "observed-failure"));
+      assert(session.executions.some((run) => run.checks?.some((check) => check.status === "passed")), "Working flow retains a passing generated check.");
       assert(session.explorations.some((item) => item.status === "observed"));
       if (deep || (previous && previous.input.depth !== "standard")) {
-        assert(session.exports.length > 0);
+        assert(ui.prompts.some((prompt) => prompt.startsWith("Tests:")));
+        assert.equal(session.exports.length, 0);
       } else {
         assert.equal(ui.prompts.length, 1, ui.prompts.join("\n"));
         assert.equal(session.exports.length, 0);
       }
       const invocations = (await readdir(session.dir, {recursive: true})).filter(path => path.endsWith("invocation.json"));
-      const metrics = { depth: session.input.depth ?? "deep (legacy)", promptCount: ui.prompts.length, aiStageCount: invocations.length, elapsedMs: Date.now() - started, session: session.id };
-      if (!deep && !previous) { assert.equal(metrics.aiStageCount, 3); }
+      const metrics = { depth: session.input.depth ?? "deep (legacy)", promptCount: ui.prompts.length, aiStageCount: invocations.length, stages: ui.stages, elapsedMs: Date.now() - started, totalWithReplayMs: 0, session: session.id };
+      if (!deep && !previous) { assert(metrics.aiStageCount >= 4, "Discovery plus conditional assessment; any generation retries are retained."); }
       await writeFile(join(session.dir, "live-metrics.json"), JSON.stringify(metrics, null, 2));
       console.log("LIVE METRICS: " + JSON.stringify(metrics));
       const explorationDir = (await readdir(session.dir)).find((path) =>
@@ -236,7 +248,7 @@ test(
       assert(evidence.some((path) => path.endsWith(".trace")));
       const revision = session.revisions.at(-1)!;
       const hashes = revision.tests.map((item) => item.sha256);
-      regression = true;
+      // Replay the same application failure with unchanged approved assertions.
       await executeRevision(session, new AbortController().signal, console.log);
       assert.equal(
         session.executions
@@ -265,8 +277,17 @@ test(
       assert(failureEvidence.some((path) => path.endsWith("trace.zip")));
       assert(failureEvidence.some((path) => path.endsWith(".png")));
       session.status = "failed";
-      session.reason = "Deliberate fixture regression failed with unchanged approved assertions; the original passing run is retained.";
+      session.reason = "Missing required Name validation reproduced with unchanged approved assertions; the working create flow and supported improvements are retained.";
       await saveSession(session);
+      const report = await readFile(join(session.dir, "report.md"), "utf8");
+      assert.match(report, /Observed failures/);
+      assert.match(report, /Potential improvements/);
+      assert.match(report, /Passing checks available for reuse/);
+      const reopened = await check({ session: session.id }, new FixtureReview());
+      assert.deepEqual(reopened.improvements, session.improvements);
+      assert.equal((await readdir(session.dir, { recursive: true })).filter(path => path.endsWith("invocation.json")).length, invocations.length);
+      metrics.totalWithReplayMs = Date.now() - started;
+      await writeFile(join(session.dir, "live-metrics.json"), JSON.stringify(metrics, null, 2));
       console.log(`LIVE SESSION EVIDENCE: ${session.dir}`);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));

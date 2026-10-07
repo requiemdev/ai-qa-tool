@@ -30,6 +30,9 @@ import {
   saveSession,
   sha256,
   containedPath,
+  coverageGaps,
+  passingTests,
+  formatImprovement,
 } from "./session.js";
 import type { Session, Scenario } from "./session-types.js";
 import { selectSupport } from "./execution.js";
@@ -571,17 +574,14 @@ export async function reviewFindings(
   classify = true,
 ): Promise<void> {
   ui.section("Results");
-  for (const item of session.executions) {
-    const symbol = item.status === "passed" ? pc.green("✔") : pc.red("✖");
-    const statusText =
-      item.status === "passed" ? pc.green(item.status) : pc.red(item.status);
-    ui.show(
-      `${symbol} ${item.phase}/${item.runner}: ${statusText} ${pc.dim("(" + item.artifacts + ")")}`,
-    );
-  }
+  const revision = session.revisions.at(-1)?.number;
+  const latest = new Map(session.executions.filter((run) => run.revision === revision).map((run) => [run.phase + ":" + run.runner, run]));
+  ui.show(`Selected scope: ${session.input.intent}\nSelected-scope checks: ${[...latest.values()].map((run) => `${run.phase}/${run.runner}: ${run.status}`).join(", ") || "No execution results."}`);
+  ui.section("Observed failures");
+  if (!session.findings.length) ui.show("None recorded.");
   for (const finding of session.findings) {
     ui.show(
-      `${pc.bold(pc.red("Finding " + finding.id))}: ${pc.bold(finding.category)}\n${finding.observed}\nEvidence: ${finding.evidence.join(", ")}\nSuspected cause: ${finding.suspectedCause || "Unknown"}\nSuggested fix: ${finding.suggestedFix || "Inspect evidence"}`,
+      `${pc.bold(pc.red("Observed failure " + finding.id))}: ${pc.bold(finding.category)}\n${finding.observed.split("\n")[0]}\nEvidence: ${finding.evidence.join(", ")}\nSuspected cause: ${finding.suspectedCause || "Unknown"}\nSuggested fix: ${finding.suggestedFix || "Inspect evidence"}`,
     );
     if (
       !classify ||
@@ -602,6 +602,23 @@ export async function reviewFindings(
       await ui.required("Reason/evidence for classification"),
     );
     await saveSession(session);
+  }
+  ui.section("Potential improvements");
+  const supported = session.improvements.filter((item) => item.assessment === "supported");
+  if (!supported.length) ui.show(session.improvements.length ? "No supported recommendations; candidate history is retained in the report." : "No improvements were identified within the inspected scope.");
+  for (const item of supported) ui.show(formatImprovement(item));
+  const unverified = session.improvements.filter((item) => item.assessment === "pending" || item.assessment === "unverified");
+  if (unverified.length) {
+    ui.section("Unverified improvement candidates");
+    for (const item of unverified) ui.show(formatImprovement(item));
+  }
+  ui.section("Coverage limitations");
+  ui.show([...new Set([...session.gaps, ...coverageGaps(session)])].join("\n") || "None recorded.");
+  const passed = passingTests(session);
+  ui.show(`Passing checks: ${passed.map((test) => `${test.id}: ${test.path}`).join(", ") || "None."}`);
+  ui.section("Execution evidence");
+  for (const item of session.executions) {
+    ui.show(`${item.phase}/${item.runner}: ${item.status} (${item.artifacts})`);
   }
 }
 

@@ -216,21 +216,24 @@ async function assessFindings(session: Session, ui: Terminal): Promise<void> {
   const current = session.findings.filter(
     (item) => !item.suspectedCause && !item.suggestedFix,
   );
-  if (!current.length) {
+  const pending = session.improvements.filter((item) => item.assessment === "pending");
+  if (!current.length && !pending.length) {
     return;
   }
   const evidence = await Promise.all(
     session.executions
       .filter((run) =>
-        current.some((finding) => finding.executionId === run.id),
+        current.some((finding) => finding.executionId === run.id) ||
+        pending.some((candidate) => session.revisions.find((revision) => revision.number === run.revision)?.tests.some((test) => run.testIds.includes(test.id) && test.scenarioIds.some((id) => candidate.scenarioIds.includes(id)))),
       )
+      .slice(-12)
       .map(async (run) => ({
-        run,
-        results: summarizeEvidence(
+        run: { id: run.id, revision: run.revision, phase: run.phase, runner: run.runner, testIds: run.testIds, status: run.status, artifacts: run.artifacts, reason: run.reason.slice(0, 1000) },
+        results: JSON.stringify(summarizeEvidence(
           await readFile(join(run.artifacts, "results.json"), "utf8").catch(
             () => "",
           ),
-        ),
+        )).slice(0, 12000),
         stderr: (
           await readFile(join(run.artifacts, "stderr.log"), "utf8").catch(
             () => "",
@@ -238,7 +241,7 @@ async function assessFindings(session: Session, ui: Terminal): Promise<void> {
         ).slice(-3000),
       })),
   );
-  const result = await ui.working("Assessing findings", async (progress) =>
+  const result = await ui.working("Assessing findings and improvement evidence", async (progress) =>
     invokeCodex({
       dir: join(session.dir, "finding-review-" + Date.now()),
       role: "reviewer",
@@ -248,31 +251,36 @@ async function assessFindings(session: Session, ui: Terminal): Promise<void> {
       timeout: session.input.timeout,
       ...(session.input.model ? { model: session.input.model } : {}),
       progress,
-      prompt: `Independently assess evidence supporting these findings. Original observations/classifications are immutable. Return only suspected causes and suggested fixes, clearly labeling hypotheses. Cite source path:line only when the supplied source supports it. Environment and invalid-test failures do not establish application bugs.\n${JSON.stringify({ findings: current, evidence, source: session.context?.files, tests: session.revisions.at(-1)?.tests })}`,
+      prompt: `Assess the supplied execution findings and pending improvement candidates against the structured observations, source and bounded execution evidence. Original observations/classifications and candidate descriptions are immutable. Return exactly one finding assessment for each supplied finding ID and exactly one improvement assessment for each supplied candidate ID; no unknown or duplicate IDs. Finding causes and fixes must clearly label hypotheses. Cite source path:line only when supplied source supports it. Environment and invalid-test failures do not establish application bugs. Improvement assessment must be supported, unverified or dismissed with a meaningful reason. Support only evidence-backed recommendations; dismiss unsupported preferences and alternatives that do not improve intentional behavior. A passing check can coexist with a supported improvement; advisories never change acceptance requirements. Artifact paths are references, not image content: no screenshots are supplied to you, so do not claim screenshot inspection. Use supplied structured flow observations and text evidence; if visual support is unavailable, mark that claim unverified.\n${JSON.stringify({ input: session.input, developerFeedback: session.feedback, findings: current, improvements: pending, observations: session.explorations, executionEvidence: JSON.stringify(evidence).slice(0, 18000), executionEvidenceLimit: "Latest 12 relevant runs; text capped at 18000 characters. Truncated evidence may require an unverified assessment.", source: session.context?.files, tests: session.revisions.at(-1)?.tests })}`,
     }),
   );
   validateSchema(result, findingReviewSchema);
-  for (const suggestion of (
-    result as {
-      findings: {
-        id: string;
-        suspectedCause: string;
-        suggestedFix: string;
-        source: string[];
-      }[];
+  const review = result as {
+    findings: { id: string; suspectedCause: string; suggestedFix: string; source: string[] }[];
+    improvements: { id: string; assessment: "supported" | "unverified" | "dismissed"; assessmentReason: string }[];
+  };
+  for (const [supplied, returned] of [[current, review.findings], [pending, review.improvements]] as const) {
+    if (returned.length !== supplied.length || new Set(returned.map((item) => item.id)).size !== returned.length || returned.some((item) => !supplied.some((candidate) => candidate.id === item.id))) {
+      throw new Error("Evidence assessment must map each supplied ID exactly once, without unknown or duplicate IDs.");
     }
-  ).findings) {
-    const finding = current.find((item) => item.id === suggestion.id);
-    if (!finding) {
-      throw new Error("Reviewer referenced unknown finding.");
-    }
+  }
+  if (review.improvements.some((item) => !item.assessmentReason.trim())) {
+    throw new Error("Improvement assessment requires a meaningful reason.");
+  }
+  for (const suggestion of review.findings) {
+    const finding = current.find((item) => item.id === suggestion.id)!;
     finding.suspectedCause = suggestion.suspectedCause;
     finding.suggestedFix = suggestion.suggestedFix;
-    finding.source = suggestion.source.filter((citation) =>
-      session.context?.files.some((file) =>
-        citation.startsWith(file.path + ":"),
-      ),
-    );
+    finding.source = suggestion.source.filter((citation) => {
+      const match = /^(.*):([1-9]\d*)$/.exec(citation);
+      const file = match && session.context?.files.find((file) => file.path === match[1]);
+      return file && Number(match![2]) <= file.content.split("\n").length;
+    });
+  }
+  for (const assessment of review.improvements) {
+    const candidate = pending.find((item) => item.id === assessment.id)!;
+    candidate.assessment = assessment.assessment;
+    candidate.assessmentReason = assessment.assessmentReason;
   }
 }
 
@@ -543,6 +551,25 @@ export async function check(
         await saveSession(session);
       }
       if (session.stage === "findings" || session.stage === "complete") {
+        if (session.stage === "findings") {
+          try {
+            await assessFindings(session, ui);
+          } catch (error) {
+            if (ui.controller.signal.aborted) {
+              throw error;
+            }
+            const reason = error instanceof Error ? error.message : String(error);
+            ui.warn(`Evidence assessment incomplete: ${reason}`);
+            for (const candidate of session.improvements.filter((item) => item.assessment === "pending")) {
+              candidate.assessment = "unverified";
+              candidate.assessmentReason = "Evidence assessment unavailable: " + reason;
+            }
+            if (isDeep(session)) {
+              session.gaps.push("Independent finding assessment incomplete.");
+            }
+          }
+          await saveSession(session);
+        }
         if (!isDeep(session) && !options.followup) {
           await reviewFindings(session, ui, false);
           ui.show([...coverageGaps(session), ...unresolvedGaps(session)].join("\n") || "Selected coverage complete.");
@@ -550,19 +577,6 @@ export async function check(
           session.stage = "complete";
           await saveSession(session);
           return session;
-        }
-        if (isDeep(session) && session.stage === "findings") {
-          try {
-            await assessFindings(session, ui);
-          } catch (error) {
-            if (ui.controller.signal.aborted) {
-              throw error;
-            }
-            ui.warn(
-              `Finding review incomplete: ${error instanceof Error ? error.message : String(error)}`,
-            );
-            session.gaps.push("Independent finding assessment incomplete.");
-          }
         }
         await reviewFindings(session, ui);
         ui.section("Coverage");

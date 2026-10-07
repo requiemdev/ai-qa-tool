@@ -2,11 +2,11 @@
 
 Interactive local pre-merge QA for JavaScript/TypeScript projects:
 
-**Select repo → enter URL and intent → analyse/explore → generate tests → approve and run → report.**
+**Select repo → enter URL and intent → analyse/explore → generate tests → approve and run → conditional evidence assessment → report.**
 
 The default requires four responses: repository path, localhost URL, intent, and execution approval. Supply the first three as flags to leave only execution approval.
 
-Codex uses your local ChatGPT sign-in for sequential QA planning, browser exploration through Playwright MCP, test generation, in three AI stages. Repeatable browser tests run through Playwright Test. Normal sessions generate and run browser and existing-runner unit/integration tests. `--deep` adds detailed scenario review, independent AI test review, and finding assessment/classification.
+Codex uses your local ChatGPT sign-in for planning, scoped browser exploration through Playwright MCP, and test generation. A fourth AI stage assesses evidence only when unresolved execution findings or pending improvement candidates exist. Repeatable browser tests run through Playwright Test. Normal sessions generate and run browser and existing-runner unit/integration tests, and can report improvements even when every check passes. `--deep` adds detailed scenario review, independent AI test review, and manual finding classification.
 
 ## Install
 
@@ -60,6 +60,10 @@ The branch summary labels the target branch and comparison reference separately 
 
 By default the displayed plan automatically selects scenarios, separately from developer approval. It targets 1–3 focused browser or unit/integration scenarios around changed behavior and the most relevant regression, with explicit criteria overriding that target. Unit/integration tests use detected existing runners in both normal and deep sessions; unavailable runners or prerequisites are reported as coverage gaps.
 
+Planning may propose source-grounded improvement candidates. Exploration inspects the selected flows for unclear instructions, weak success/error feedback, unnecessary steps, and relevant keyboard or responsive usability problems. It uses keyboard and resize tools only when relevant to the changed behavior; this is not a whole-app UX audit. Empty improvement output is valid. Benefits are inferred, and candidates never become acceptance requirements or generate tests solely to enforce a preference.
+
+After execution, conditional evidence assessment marks each pending candidate **supported**, **unverified**, or **dismissed**. Supported recommendations include the observation, expected benefit, priority, suggested change, and retained evidence. Unverified candidates are labelled separately; dismissed observations remain in detailed history. Passing checks and observed failures remain separate from advisories. An unavailable assessment preserves execution results and marks candidates unverified; normal coverage, pass/fail status, and exit codes still follow execution and acceptance coverage. Deep mode retains its independent assessment failure accounting. Reopening a completed session does not repeat assessment; reruns or revised plans returning to the findings stage can assess newly pending candidates.
+
 With `--deep`, review scenarios with `approve`, `edit`, `add`, or `exclude`. Exclusion requires a reason. Scenarios map to stable acceptance IDs such as `AC1` and stable scenario IDs such as `S1`. Exploration exercises only approved flows, using snapshots at each state, including dialogs, navigation, and dynamically rendered controls. Progress prints browser tool activity; successful and failed interactions retain screenshots and action evidence.
 
 The default displays scope, assumed prerequisites, test summaries, hashes, required support, and the saved test folder before one prompt: **Run all / inspect / edit / regenerate / cancel**. Test source is hidden unless you choose `inspect` (or `source` with `--deep`). `Run all` approves the exact listed files and execution, then runs immediately. Test files, results, and reports are saved automatically inside the session folder; there are no mandatory classification, gap-exclusion, finish, or export prompts. Failed checks and incomplete selected coverage cannot become passing. If some approved tests passed but selected coverage or execution remains incomplete, the result is **partial**; **blocked** means there are no usable passing tests. Results list passing test IDs and the saved test folder so you can reuse them while keeping gaps recorded. A failed check still produces **failed**, even when other tests pass.
@@ -95,8 +99,8 @@ AI stages use `gpt-5.6-luna` with `medium` reasoning by default (`xhigh` for dee
 
 Each guided session lives under the tool checkout's ignored `.agent-qa/session-*/` directory:
 
-- `session.json` and `report.json`: version 2 records linking source, scenarios, exploration, test revisions, execution IDs/file hashes, findings, feedback, and exports.
-- `report.md`: readable scope, source assumptions, coverage, omitted context, evidence, findings, and feedback.
+- `session.json` and `report.json`: version 2 records linking source, scenarios, exploration, test revisions, execution IDs/file hashes, findings, improvements, feedback, and exports.
+- `report.md`: selected-scope outcome, observed failures, potential improvements, coverage limitations, passing checks, and detailed source/evidence/history.
 - `generated-tests/revision-*/tests/`: generated unit/integration and Playwright tests with required support files; each revision preserves original relative paths and imports.
 - `analysis-*`, `exploration-*`, `generated-tests/revision-*`: prompts, strict schemas, model responses, invocation metadata, stdout/stderr, independent reviews, screenshots, MCP action logs and raw traces.
 - `execution-*`: exact selected specs/support, disposable source snapshots, execution records, logs, runner JSON, Playwright screenshots and trace ZIPs.
@@ -123,7 +127,7 @@ Modules separate shared data definitions from the operations that use them:
 
 | Module | Responsibility |
 | --- | --- |
-| `session-types.ts` | Serializable scenarios, generated tests, exploration, executions, findings, feedback, and session state. |
+| `session-types.ts` | Serializable scenarios, generated tests, exploration, executions, findings, improvements, feedback, and session state. |
 | `context-types.ts` | Git changes, source context, branch metadata, and detected test runners. |
 | `session.ts` | Session persistence, feedback history, coverage accounting, reports, and artifact path validation. |
 | `context.ts` / `branch.ts` | Safe source reads, Git inspection, runner detection, and source snapshots. |

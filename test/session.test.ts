@@ -30,8 +30,10 @@ import {
   sessionExitCode,
   sha256,
   containedPath,
+  renderReport,
 } from "../src/session.js";
 import { validateSchema, planSchema, validateTests } from "../src/stages.js";
+import { validateDiscoveryResponse, validateImprovementCandidate } from "../src/schemas.js";
 import { executeRevision, resultStatus, selectSupport, fileStatus } from "../src/execution.js";
 import {
   reviewScenarios,
@@ -39,6 +41,7 @@ import {
   exportTests,
   editRevision,
   Terminal,
+  reviewFindings,
 } from "../src/interactive.js";
 import { check } from "../src/workflow.js";
 import { browserActionSetPrompt, browserTools } from "../src/codex.js";
@@ -99,6 +102,95 @@ const generated = {
     "import { test, expect } from '@playwright/test'; test('Create', async ({page}) => { await expect(page.getByRole('status')).toHaveText('Created Ada'); });\n",
   supportIds: [],
 };
+
+test("advisories validate independently and survive version-2 session persistence", async () => {
+  const session = await newSession(input);
+  const candidate = {
+    scenarioIds: ["S1"],
+    title: "Explain the submit result",
+    observed: "The working submit flow has no visible confirmation.",
+    benefit: "Inferred: users can recognize completion without repeating the action.",
+    suggestedChange: "Add a visible status message after submission.",
+    priority: "medium" as const,
+    source: [],
+    evidence: ["exploration/response.json"],
+  };
+  const files = [{ path: "src/form.ts", content: "submit();\n" }];
+  try {
+    assert.deepEqual(session.improvements, []);
+    session.scenarios = [scenario];
+    const response = { summary: "Scoped plan", conflicts: [], gaps: [], scenarios: [], improvements: [candidate, { ...candidate, scenarioIds: ["S999"] }, { ...candidate, source: ["unknown.ts:1"] }] };
+    const validated = validateDiscoveryResponse(response, planSchema, ["S1"], files);
+    assert.deepEqual(validated.improvements, [candidate]);
+    assert.equal(validated.rejected.length, 2);
+    assert.equal(response.improvements.length, 3);
+    for (const invalid of [
+      { ...candidate, observed: " " },
+      { ...candidate, source: [], evidence: [] },
+      { ...candidate, scenarioIds: [], source: [] },
+      { ...candidate, evidence: [""] },
+      { ...candidate, source: ["src/form.ts:0"] },
+      { ...candidate, source: ["src/form.ts:99"] },
+    ]) assert.throws(() => validateImprovementCandidate(invalid, ["S1"], files));
+    assert.deepEqual(validateImprovementCandidate({ ...candidate, scenarioIds: [], source: ["src/form.ts:1"], evidence: [] }, ["S1"], files).scenarioIds, []);
+    session.improvements = [{ ...candidate, id: "I1", assessment: "dismissed", assessmentReason: "The existing confirmation is intentional and sufficient." }];
+    await saveSession(session);
+    assert.deepEqual((await loadSession(session.id)).improvements, session.improvements);
+    assert.deepEqual(session.findings, []);
+    const path = join(session.dir, "session.json");
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    const { improvements: _improvements, ...legacy } = saved;
+    await writeFile(path, JSON.stringify(legacy));
+    assert.deepEqual((await loadSession(session.id)).improvements, []);
+    for (const improvements of [null, {}, [1], [{ ...session.improvements[0], scenarioIds: ["S999"] }], [{ ...session.improvements[0], assessment: "bug" }], [{ ...session.improvements[0], assessmentReason: "" }]]) {
+      await writeFile(path, JSON.stringify({ ...saved, improvements }));
+      await assert.rejects(loadSession(session.id), /improvement record/);
+    }
+  } finally {
+    await rm(session.dir, { recursive: true, force: true });
+  }
+});
+
+test("reports lead with failures and advisory actions, preserve passing checks and dismissed history", async () => {
+  const session = await newSession({ ...input, depth: "standard" });
+  try {
+    session.scenarios = [scenario];
+    session.explorations = [{ scenarioId: "S1", status: "observed", observed: "Created Ada", steps: [], evidence: ["flow.json"] }];
+    session.revisions = [{ number: 1, dir: session.dir, tests: [{ ...generated, kind: "browser", runner: "playwright", sha256: sha256(generated.content), approved: true }], review: "", feedback: "" }];
+    session.executions = [{ id: "run", revision: 1, phase: "generated", runner: "playwright", testIds: ["T1"], files: [{ path: generated.path, sha256: sha256(generated.content) }], status: "passed", artifacts: "execution-evidence", reason: "", startedAt: session.createdAt }];
+    session.findings = [{ id: "F1", executionId: "old-run", scenarioIds: ["S1"], category: "observed-failure", observed: "Earlier submission showed the wrong name.", suspectedCause: "Hypothesis: stale state", suggestedFix: "Inspect state handling", source: [], evidence: ["original-failure"] }];
+    const candidate = { scenarioIds: ["S1"], title: "Explain the next step", observed: "Submission succeeds without next-step instructions.", benefit: "Users can continue after creating an item.", suggestedChange: "Add a next-step hint.", priority: "medium" as const, source: [], evidence: ["flow.json"], assessmentReason: "Structured observation supports the recommendation." };
+    session.improvements = [
+      { ...candidate, id: "I1", assessment: "supported" },
+      { ...candidate, id: "I2", title: "Unverified responsive claim", assessment: "unverified", assessmentReason: "No resize evidence supplied." },
+      { ...candidate, id: "I3", title: "Dismissed colour preference", assessment: "dismissed", assessmentReason: "Intentional styling; unsupported preference." },
+    ];
+    const report = renderReport(session);
+    assert(report.indexOf("## Observed failures") < report.indexOf("## Potential improvements"));
+    assert(report.indexOf("## Potential improvements") < report.indexOf("## Source and assumptions"));
+    assert.match(report, /Expected benefit \(inferred\): Users can continue/);
+    assert.match(report, /Observation: Submission succeeds/);
+    assert.match(report, /Suggested change: Add a next-step hint/);
+    assert.match(report, /Unverified improvement candidates[\s\S]*No resize evidence supplied/);
+    assert(report.indexOf("Dismissed colour preference") > report.indexOf("## Dismissed improvement history"));
+    assert.match(report, /T1: tests\/create.spec.ts/);
+    assert.match(report, /original-failure/);
+    assert.match(report, /execution-evidence/);
+    const ui = new ScriptedTerminal([]);
+    try {
+      await reviewFindings(session, ui, false);
+      assert.equal(ui.prompts.length, 0);
+      const output = ui.output.join("\n");
+      assert(output.indexOf("Selected scope:") < output.indexOf("Observed failure F1"));
+      assert(output.indexOf("Explain the next step") < output.indexOf("execution-evidence"));
+      assert(!output.includes("Dismissed colour preference"));
+      assert.match(output, /Unverified responsive claim/);
+      assert.match(output, /Passing checks: T1/);
+    } finally { ui.close(); }
+    session.improvements = [];
+    assert.match(renderReport(session), /No improvements were identified within the inspected scope/);
+  } finally { await rm(session.dir, { recursive: true, force: true }); }
+});
 
 test("browser prompts match the enabled action set", () => {
   for (const tool of browserTools) {
@@ -677,9 +769,12 @@ test("editor changes create a new unapproved revision while originals remain imm
 
 class WorkflowTerminal extends ScriptedTerminal {
   stages: string[] = [];
+  override warn(text: string): void { this.output.push(text); }
   execute = false;
+  assessmentResponse?: unknown;
   override async working<T>(label: string, task: (progress: (text: string) => void) => Promise<T>): Promise<T> {
     this.stages.push(label);
+    if (label === "Assessing findings and improvement evidence" && this.assessmentResponse !== undefined) return this.assessmentResponse as T;
     // Exercise workflow transitions without starting a browser in terminal checks.
     if (label === "Executing approved tests" && !this.execute) { return undefined as T; }
     return task(() => {});
@@ -715,10 +810,22 @@ const scenario = {title:'Show After',criteria:['AC1'],kind:'normal',steps:['Open
 const test = ${JSON.stringify({ ...generated, content: "import {test,expect} from '@playwright/test'; test('After', async ({page}) => { await page.goto('http://127.0.0.1:3000/'); await expect(page.getByRole('heading')).toHaveText('After'); });" })};
 const unit = {...test, id:'T2', path:'tests/unit.test.cjs', kind:'unit', runner:'node', content:"const test = require('node:test'); const assert = require('node:assert/strict'); const { value } = require('../value.cjs'); const { expected } = require('./unit-helper.cjs'); test('value', () => assert.equal(value, expected));", supportIds:['H1']};
 const support = {...unit, id:'H1', path:'tests/unit-helper.cjs', kind:'support', scenarioIds:[], content:'exports.expected = 1;', supportIds:[]};
+const candidate = {scenarioIds:['S1'],title:'Clarify confirmation',observed:'The selected flow has no clear next-step instruction.',benefit:'An explicit next step could make the completed action easier to understand.',suggestedChange:'Add a next-step instruction beside the confirmation.',priority:'low',source:['index.html:1'],evidence:[]};
+const advisory = prompt.includes('advisory fixture');
 let result;
-if (schema.properties.scenarios) result = {summary:'Changed heading',conflicts:[],gaps:[],scenarios:prompt.includes('untestable fixture') ? [] : [scenario]};
-else if (schema.properties.flows) result = {flows:[{scenarioId:'S1',status:'observed',steps:['Open page'],observed:'After appears; getByRole heading observed',evidence:[]}],gaps:[]};
-else if (schema.properties.tests) result = {tests:prompt.includes('unit-only fixture') ? [unit,support] : [test,unit,support],gaps:[]};
+if (schema.properties.scenarios) result = {summary:'Changed heading',conflicts:[],gaps:[],scenarios:prompt.includes('untestable fixture') ? [] : [scenario],improvements:advisory ? [candidate, ...(prompt.includes('malformed fixture') ? [{...candidate,scenarioIds:['S999']},{...candidate,source:['unknown.ts:1']}] : [])] : []};
+else if (schema.properties.flows) result = {flows:[{scenarioId:'S1',status:'observed',steps:['Open page'],observed:'After appears; getByRole heading observed',evidence:[]}],gaps:[],improvements:advisory ? [{...candidate,evidence:['flow:S1']}, ...(prompt.includes('malformed fixture') ? [{...candidate,source:[],evidence:['made-up-screenshot.png']}] : [])] : []};
+else if (schema.properties.tests) result = {tests:prompt.includes('unit-only fixture') ? [{...unit,content:prompt.includes('failing-unit fixture') ? unit.content.replace('assert.equal(value, expected)', 'assert.equal(value, 2)') : unit.content},support] : [test,unit,support],gaps:[]};
+else if (schema.properties.findings) {
+  const supplied = JSON.parse(prompt.trim().split('\\n').at(-1));
+  const intent = supplied.input.intent;
+  if (intent.includes('unavailable fixture')) process.exit(1);
+  const assessments = supplied.improvements.map(item => ({id:item.id,assessment:intent.includes('dismissed fixture') ? 'dismissed' : 'supported',assessmentReason:intent.includes('dismissed fixture') ? 'Current behavior is intentional; no benefit is supported.' : 'The structured flow and supplied source support the proposed next-step instruction.'}));
+  if (intent.includes('unknown-assessment fixture')) assessments[0].id = 'unknown';
+  if (intent.includes('duplicate-assessment fixture')) assessments.push(assessments[0]);
+  if (intent.includes('missing-assessment fixture')) assessments.length = 0;
+  result = {findings:supplied.findings.map(item => ({id:item.id,suspectedCause:'Hypothesis: value differs from required output.',suggestedFix:'Check the selected value handling.',source:['index.html:1']})), improvements:assessments};
+}
 else result = {assessment:'Reviewed assertions',issues:[],gaps:[]};
 writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(result));
 `);
@@ -808,6 +915,14 @@ writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(result));
       await readFile(join(revision.dir, "tests", revision.tests[0]!.path), "utf8"),
       revision.tests[0]!.content,
     );
+    deep.input.intent = "advisory fixture unavailable fixture";
+    deep.improvements = [{ id: "I-deep", scenarioIds: ["S1"], title: "Clarify confirmation", observed: "No next-step instruction appears.", benefit: "An instruction could clarify the next step.", suggestedChange: "Add a next-step instruction.", priority: "low", source: ["index.html:1"], evidence: [], assessment: "pending", assessmentReason: "Pending assessment." }];
+    deep.stage = "findings";
+    await saveSession(deep);
+    const deepFailureUi = new WorkflowTerminal(["no", "finish"]);
+    const deepFailure = await check({ session: deep.id }, deepFailureUi);
+    assert.equal(deepFailure.improvements[0]!.assessment, "unverified");
+    assert(deepFailure.gaps.includes("Independent finding assessment incomplete."));
     const limitedUi = new WorkflowTerminal([]);
     const limited = await check({ repo, url: input.url, intent: "untestable fixture", committedOnly: true }, limitedUi);
     sessions.push(limited.dir);
@@ -822,6 +937,51 @@ writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(result));
     assert.equal(unitUi.prompts.length, 1);
     assert.deepEqual(unitSession.executions.map(run => [run.phase, run.runner, run.status]), [["existing", "node", "passed"], ["generated", "node", "passed"]]);
     assert.equal(coverageGaps(unitSession).length, 0);
+    for (const variant of ["supported", "dismissed", "unavailable", "malformed", "unknown-assessment", "duplicate-assessment", "missing-assessment", "failing-unit", "failing-unit unknown-assessment"] ) {
+      const advisoryUi = new WorkflowTerminal(["run all"]);
+      advisoryUi.execute = true;
+      const advisorySession = await check({ repo, url: input.url, intent: `unit-only fixture advisory fixture ${variant.split(" ").map(word => word + " fixture").join(" ")}`, committedOnly: true }, advisoryUi);
+      sessions.push(advisorySession.dir);
+      assert.equal(advisorySession.status, variant.includes("failing-unit") ? "failed" : "passed", advisorySession.reason);
+      assert.equal(sessionExitCode(advisorySession), variant.includes("failing-unit") ? 1 : 0);
+      assert.equal(advisoryUi.prompts.length, 1);
+      assert.equal(advisorySession.improvements.length, 1, "Exact plan/exploration duplicates merge; malformed references are rejected.");
+      const candidate = advisorySession.improvements[0]!;
+      assert.equal(candidate.assessment, ["unavailable", "unknown-assessment", "duplicate-assessment", "missing-assessment"].some(value => variant.includes(value)) ? "unverified" : variant === "dismissed" ? "dismissed" : "supported");
+      assert.equal(candidate.observed, "The selected flow has no clear next-step instruction.");
+      assert(candidate.evidence.some(ref => ref.includes("analysis-") && ref.endsWith("response.json")));
+      assert(candidate.evidence.some(ref => ref.includes("exploration-") && ref.endsWith("#flow:S1")));
+      assert.equal(advisorySession.gaps.length, 0);
+      assert.equal(advisoryUi.stages.filter(label => label === "Assessing findings and improvement evidence").length, 1);
+      if (candidate.assessment === "unverified") assert(advisoryUi.output.some(text => text.includes("Evidence assessment incomplete")));
+      if (variant.includes("failing-unit")) {
+        assert(advisorySession.findings.length > 0);
+        assert(advisorySession.findings.every(item => item.observed.length));
+        assert(advisorySession.findings.every(item => variant.includes("unknown-assessment") ? item.suspectedCause === "" && item.suggestedFix === "" : item.suspectedCause.startsWith("Hypothesis:")), "Invalid ID mappings must not partially mutate findings.");
+      }
+      const reopenedUi = new WorkflowTerminal([]);
+      const reopened = await check({ session: advisorySession.id }, reopenedUi);
+      assert.deepEqual(reopened.improvements, advisorySession.improvements);
+      assert.equal(reopenedUi.stages.length, 0, "Reopening complete sessions does not repeat assessment.");
+      if (variant === "supported") {
+        reopened.improvements.push({ ...candidate, id: "I-new", observed: "A newly inspected state also lacks a next-step instruction.", assessment: "pending", assessmentReason: "New candidate pending assessment." });
+        reopened.stage = "findings";
+        await saveSession(reopened);
+        const reassessmentUi = new WorkflowTerminal([]);
+        const reassessed = await check({ session: reopened.id }, reassessmentUi);
+        assert.equal(reassessmentUi.prompts.length, 0);
+        assert.equal(reassessmentUi.stages.length, 1);
+        assert.equal(reassessed.improvements.length, 2);
+        assert(reassessed.improvements.every(item => item.assessment === "supported"));
+        assert.equal(reassessed.status, "passed");
+      }
+      const discoveryDir = (await readdir(advisorySession.dir)).find(name => name.startsWith("analysis-"))!;
+      const planningPrompt = await readFile(join(advisorySession.dir, discoveryDir, "prompt.txt"), "utf8");
+      assert.match(planningPrompt, /Benefits remain inferred until assessed/);
+      const assessmentDir = (await readdir(advisorySession.dir)).find(name => name.startsWith("finding-review-"))!;
+      const assessmentPrompt = await readFile(join(advisorySession.dir, assessmentDir, "prompt.txt"), "utf8");
+      assert.match(assessmentPrompt, /no screenshots are supplied/);
+    }
     assert.equal(git("branch", "--show-current"), "feature");
     assert.equal(git("status", "--porcelain"), before);
     await assert.rejects(collectBranch({ repo, base: "HEAD", local: false }), /No reviewable changes/);
@@ -857,6 +1017,7 @@ test("automatic reporting retains partial coverage and exposes only current pass
       if (expected === "failed") { feedback(session, "F1", "intended", "Fixture classification"); }
       await saveSession(session);
       const ui = new WorkflowTerminal([]);
+      ui.assessmentResponse = { findings: session.findings.map((item) => ({ id: item.id, suspectedCause: "Hypothesis: confirmation content differs.", suggestedFix: "Check the confirmation rendering.", source: [] })), improvements: [] };
       const result = await check({ session: session.id }, ui);
       assert.equal(result.status, expected);
       assert.equal(result.stage, "complete");
