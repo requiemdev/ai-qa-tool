@@ -19,7 +19,7 @@ agent-qa review --session <id>
 agent-qa export --session <id>
 agent-qa check --session <id>
 Default: select repo → URL and intent → analyse/explore → generate → approve and run → report.
---deep adds detailed scenario review, unit/integration coverage, and independent review.
+--deep adds detailed scenario review and independent review.
 Ctrl-C or cancel retains partial results. Artifacts: .agent-qa/session-*/.
 
 `;

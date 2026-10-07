@@ -65,7 +65,7 @@ export const browserActionSetPrompt = [
   "If approved behavior requires an unavailable action, report it as unverified or incomplete instead of claiming it was tested.",
   "Snapshots may expose labels and hrefs but not target or rel attributes. Inspect only exposed fields during exploration; describe unexposed attributes as deferred to generated Playwright assertions, without inventing evidence.",
   "The qa_browser action restriction applies to live tool calls. Generated Playwright tests can use locator assertions such as toHaveAttribute for deferred attribute checks; keep outbound links unactivated.",
-  "Intentional depth skips are reported by the tool and must never be returned as gaps or recommendations for --deep unless selected acceptance behavior actually requires non-browser coverage.",
+  "Intentional depth skips are reported by the tool and must never be returned as gaps. Unit/integration coverage is available at either depth through detected existing runners.",
 ].join(" ");
 
 /**

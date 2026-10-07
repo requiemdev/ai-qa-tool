@@ -329,7 +329,7 @@ export function renderReport(session: Session): string {
     `Status: **${session.status}**. Stage: ${session.stage}. ${session.reason}\n\n` +
     `${session.summary}\n\n` +
     `Review depth: ${isDeep(session) ? "deep" : "standard"}.\n\n` +
-    `Skipped modules: ${isDeep(session) ? "none by default" : "generated unit/integration tests, independent AI test review, finding assessment/classification, automatic export to target repository"}.\n\n` +
+    `Skipped modules: ${isDeep(session) ? "none by default" : "independent AI test review, finding assessment/classification, automatic export to target repository"}.\n\n` +
     (revision ? `Test files saved automatically: ${join(revision.dir, "tests")}\n\n` : "") +
     `## Source and assumptions\n\n` +
     `Repository: ${session.input.repo}\n\n` +

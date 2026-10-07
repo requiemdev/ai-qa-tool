@@ -383,6 +383,7 @@ export async function editRevision(
   const number = session.revisions.length + 1;
   const dir = join(
     session.dir,
+    "generated-tests",
     "revision-" + number + "-" + randomUUID().slice(0, 8),
   );
   for (const item of original.tests) {
@@ -465,7 +466,7 @@ export async function reviewTests(
         .join("\n")}${isDeep(session) ? "\n\nIndependent review:\n" + revision.review : "\n\nIndependent AI review skipped (standard depth)."}`,
     );
     ui.show(`Test files saved automatically: ${join(revision.dir, "tests")}`);
-    if (isDeep(session) && session.context) {
+    if (session.context) {
       ui.show(
         "Existing baseline files to execute before generated unit/integration tests:\n" +
           session.context.runners

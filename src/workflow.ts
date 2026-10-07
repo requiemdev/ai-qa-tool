@@ -70,7 +70,7 @@ export type CheckOptions = {
   local?: boolean;
   /** Excludes local changes; cannot be combined with an explicit local selection. */
   committedOnly?: boolean;
-  /** Enables detailed review and existing-runner unit/integration coverage. */
+  /** Enables detailed scenario review and independent test/finding review. */
   deep?: boolean;
   /** Offers result revisions and reruns when reopening a completed standard session. */
   followup?: boolean;
@@ -464,7 +464,7 @@ export async function check(
             "Displayed scenarios selected automatically; this is not developer approval.",
           );
           if (!session.scenarios.length) {
-            const limitation = "No browser-verifiable behavior identified. Standard review cannot verify this change; use --deep for existing-runner unit/integration coverage.";
+            const limitation = "No testable scenarios identified. Inspect the reported coverage gaps and available runners.";
             session.gaps.push(limitation);
             session.status = "blocked";
             session.reason = limitation;

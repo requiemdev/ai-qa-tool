@@ -6,7 +6,7 @@ Interactive local pre-merge QA for JavaScript/TypeScript projects:
 
 The default requires four responses: repository path, localhost URL, intent, and execution approval. Supply the first three as flags to leave only execution approval.
 
-Codex uses your local ChatGPT sign-in for sequential QA planning, browser exploration through Playwright MCP, test generation, in three AI stages. Repeatable browser tests run through Playwright Test. `--deep` adds detailed scenario review, existing-runner unit/integration coverage, independent AI test review, and finding assessment/classification.
+Codex uses your local ChatGPT sign-in for sequential QA planning, browser exploration through Playwright MCP, test generation, in three AI stages. Repeatable browser tests run through Playwright Test. Normal sessions generate and run browser and existing-runner unit/integration tests. `--deep` adds detailed scenario review, independent AI test review, and finding assessment/classification.
 
 ## Install
 
@@ -47,7 +47,7 @@ Supplied flags bypass their prompts. Intent becomes AC1 unless explicit criteria
 | `--change-type feature\|bug-fix` | Type of change. |
 | `--include-local` | Compatible explicit selection of local work, included by default. |
 | `--committed-only` | Exclude staged, unstaged, and untracked work; conflicts with `--include-local`. |
-| `--deep` | Detailed scenario review, existing-runner unit/integration tests, independent review, and finding classification. |
+| `--deep` | Detailed scenario review, independent review, and finding classification. |
 | `--context <file>` | Repeatable supporting context from the selected revision. |
 | `--timeout <milliseconds>` | Per AI stage/test group limit, default 600000; range 1000–3600000. |
 | `--model <name>` | Explicit Codex model override for guided stages; default is `gpt-5.6-luna` with `medium` reasoning (`xhigh` for deep sessions). |
@@ -58,7 +58,7 @@ The checked-out target branch is reviewed without switching branches. Comparison
 
 The branch summary labels the target branch and comparison reference separately and shows head/merge-base SHAs, commit subjects/bodies, changed paths, detected runners, omitted context, and the AI analysis. Commit/intent conflicts require recorded developer clarification.
 
-By default the displayed plan automatically selects scenarios, separately from developer approval. It targets 1–3 browser scenarios around changed behavior and the most relevant regression, with explicit criteria overriding that target. Changes without browser-verifiable behavior are reported as a limitation with a suggestion to use `--deep`.
+By default the displayed plan automatically selects scenarios, separately from developer approval. It targets 1–3 focused browser or unit/integration scenarios around changed behavior and the most relevant regression, with explicit criteria overriding that target. Unit/integration tests use detected existing runners in both normal and deep sessions; unavailable runners or prerequisites are reported as coverage gaps.
 
 With `--deep`, review scenarios with `approve`, `edit`, `add`, or `exclude`. Exclusion requires a reason. Scenarios map to stable acceptance IDs such as `AC1` and stable scenario IDs such as `S1`. Exploration exercises only approved flows, using snapshots at each state, including dialogs, navigation, and dynamically rendered controls. Progress prints browser tool activity; successful and failed interactions retain screenshots and action evidence.
 
@@ -66,7 +66,7 @@ The default displays scope, assumed prerequisites, test summaries, hashes, requi
 
 With `--deep`, review generated tests with `source`, `edit`, `regenerate`, `approve`, or `reject`. Enter test IDs to approve a subset, or explicitly enter `all`. Required support files are included in that approval. Edits use `VISUAL` or `EDITOR`; configure an editor that waits for completion, for example `EDITOR='code --wait'`. Without an editor, the CLI prints a new revision path for you to edit and save. Every edit or regeneration creates a new retained revision, requiring fresh approval; deep sessions also perform independent review. Files changed after approval block execution.
 
-Each generated or edited revision automatically saves its tests and required support files under the session folder at `revision-*/tests/`, preserving relative paths and imports. The CLI and report show this folder; no export command is needed to save files within the session. Selecting `finish` saves the final report and ends the guided flow; copying tests into the target repository remains an explicit `export` command.
+Each generated or edited revision automatically saves its tests and required support files under the session folder at `generated-tests/revision-*/tests/`, preserving relative paths and imports. The CLI and report show this folder; no export command is needed to save files within the session. Selecting `finish` saves the final report and ends the guided flow; copying tests into the target repository remains an explicit `export` command.
 
 Deep results retain original observations. Classify each finding as `bug`, `intended`, `invalid`, or `unresolved`, with a reason. Classification adds feedback and never changes the executed files or erases a failed run. `revise-tests`, `revise-plan`, and `rerun` require another review/approval. Reported gaps can be explicitly excluded from accepted scope with a recorded reason; uncovered approved scenarios still prevent a passing outcome.
 
@@ -97,7 +97,8 @@ Each guided session lives under the tool checkout's ignored `.agent-qa/session-*
 
 - `session.json` and `report.json`: version 2 records linking source, scenarios, exploration, test revisions, execution IDs/file hashes, findings, feedback, and exports.
 - `report.md`: readable scope, source assumptions, coverage, omitted context, evidence, findings, and feedback.
-- `analysis-*`, `exploration-*`, revision directories: prompts, strict schemas, model responses, invocation metadata, stdout/stderr, independent reviews, screenshots, MCP action logs and raw traces.
+- `generated-tests/revision-*/tests/`: generated unit/integration and Playwright tests with required support files; each revision preserves original relative paths and imports.
+- `analysis-*`, `exploration-*`, `generated-tests/revision-*`: prompts, strict schemas, model responses, invocation metadata, stdout/stderr, independent reviews, screenshots, MCP action logs and raw traces.
 - `execution-*`: exact selected specs/support, disposable source snapshots, execution records, logs, runner JSON, Playwright screenshots and trace ZIPs.
 
 Exit codes: **0** completed passing accepted scope; **1** failed checks; **2** partial, blocked, invalid, cancelled, or incomplete scope. Partial results allow test reuse but still signal incomplete coverage to CI. An intended/invalid classification does not turn the original failure into a pass. Suggested causes and fixes are separated from observations; source citations are retained only for supplied files.

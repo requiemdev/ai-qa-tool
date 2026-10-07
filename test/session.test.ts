@@ -520,7 +520,7 @@ test("standard browser validation accepts delegated Playwright support assertion
       id: "H1",
       path: "tests/helper.ts",
       kind: "support",
-      runner: "node",
+      runner: "playwright",
       scenarioIds: [],
       content:
         "import { expect } from '@playwright/test'; export function assertLayout() { expect(true).toBe(true); }\n",
@@ -649,6 +649,7 @@ test("editor changes create a new unapproved revision while originals remain imm
       ui.close();
     }
     assert.equal(session.revisions.length, 2);
+    assert.equal(join(session.revisions[1]!.dir, ".."), join(session.dir, "generated-tests"));
     assert.equal(
       await readFile(join(dir, "tests", generated.path), "utf8"),
       generated.content,
@@ -676,10 +677,11 @@ test("editor changes create a new unapproved revision while originals remain imm
 
 class WorkflowTerminal extends ScriptedTerminal {
   stages: string[] = [];
+  execute = false;
   override async working<T>(label: string, task: (progress: (text: string) => void) => Promise<T>): Promise<T> {
     this.stages.push(label);
     // Exercise workflow transitions without starting a browser in terminal checks.
-    if (label === "Executing approved tests") { return undefined as T; }
+    if (label === "Executing approved tests" && !this.execute) { return undefined as T; }
     return task(() => {});
   }
 }
@@ -694,6 +696,9 @@ test("fluid workflow requires explicit repo, bypasses supplied flags, asks four/
     git("config", "user.name", "Fixture");
     git("config", "user.email", "fixture@example.test");
     await writeFile(join(repo, "index.html"), "<h1>Before</h1>");
+    await writeFile(join(repo, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
+    await writeFile(join(repo, "value.cjs"), "exports.value = 1;\n");
+    await writeFile(join(repo, "existing.test.cjs"), "const test = require('node:test'); const assert = require('node:assert/strict'); test('baseline', () => assert.equal(require('./value.cjs').value, 1));\n");
     git("add", "."); git("commit", "-qm", "baseline");
     git("checkout", "-qb", "feature");
     await writeFile(join(repo, "index.html"), "<h1>After</h1>");
@@ -708,10 +713,12 @@ const schema = JSON.parse(readFileSync(args[args.indexOf('--output-schema') + 1]
 const prompt = readFileSync(0, 'utf8');
 const scenario = {title:'Show After',criteria:['AC1'],kind:'normal',steps:['Open page'],expected:'After appears'};
 const test = ${JSON.stringify({ ...generated, content: "import {test,expect} from '@playwright/test'; test('After', async ({page}) => { await page.goto('http://127.0.0.1:3000/'); await expect(page.getByRole('heading')).toHaveText('After'); });" })};
+const unit = {...test, id:'T2', path:'tests/unit.test.cjs', kind:'unit', runner:'node', content:"const test = require('node:test'); const assert = require('node:assert/strict'); const { value } = require('../value.cjs'); const { expected } = require('./unit-helper.cjs'); test('value', () => assert.equal(value, expected));", supportIds:['H1']};
+const support = {...unit, id:'H1', path:'tests/unit-helper.cjs', kind:'support', scenarioIds:[], content:'exports.expected = 1;', supportIds:[]};
 let result;
-if (schema.properties.scenarios) result = {summary:'Changed heading',conflicts:[],gaps:[],scenarios:prompt.includes('unit-only fixture') ? [] : [scenario]};
+if (schema.properties.scenarios) result = {summary:'Changed heading',conflicts:[],gaps:[],scenarios:prompt.includes('untestable fixture') ? [] : [scenario]};
 else if (schema.properties.flows) result = {flows:[{scenarioId:'S1',status:'observed',steps:['Open page'],observed:'After appears; getByRole heading observed',evidence:[]}],gaps:[]};
-else if (schema.properties.tests) result = {tests:[test],gaps:[]};
+else if (schema.properties.tests) result = {tests:prompt.includes('unit-only fixture') ? [unit,support] : [test,unit,support],gaps:[]};
 else result = {assessment:'Reviewed assertions',issues:[],gaps:[]};
 writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(result));
 `);
@@ -744,6 +751,10 @@ writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(result));
       assert(!ui.output.some(text => text.startsWith("--- ")));
       assert(!ui.output.some(text => text.includes("import {test,expect}")));
       const revision = session.revisions.at(-1)!;
+      assert.equal(join(revision.dir, ".."), join(session.dir, "generated-tests"));
+      assert.deepEqual(revision.tests.map(file => file.kind), ["browser", "unit", "support"]);
+      assert.equal(revision.tests.find(file => file.kind === "support")!.runner, "node");
+      assert(revision.tests.every(file => file.approved));
       assert(ui.output.includes(`Test files saved automatically: ${join(revision.dir, "tests")}`));
       for (const file of revision.tests) {
         assert.equal(await readFile(join(revision.dir, "tests", file.path), "utf8"), file.content);
@@ -798,11 +809,19 @@ writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(result));
       revision.tests[0]!.content,
     );
     const limitedUi = new WorkflowTerminal([]);
-    const limited = await check({ repo, url: input.url, intent: "unit-only fixture", committedOnly: true }, limitedUi);
+    const limited = await check({ repo, url: input.url, intent: "untestable fixture", committedOnly: true }, limitedUi);
     sessions.push(limited.dir);
     assert.equal(limited.status, "blocked");
-    assert.match(limited.reason, /No browser-verifiable.*--deep/);
+    assert.match(limited.reason, /No testable scenarios/);
     assert.equal(limitedUi.prompts.length, 0);
+    const unitUi = new WorkflowTerminal(["run all"]);
+    unitUi.execute = true;
+    const unitSession = await check({ repo, url: input.url, intent: "unit-only fixture", committedOnly: true }, unitUi);
+    sessions.push(unitSession.dir);
+    assert.equal(unitSession.status, "passed", unitSession.reason);
+    assert.equal(unitUi.prompts.length, 1);
+    assert.deepEqual(unitSession.executions.map(run => [run.phase, run.runner, run.status]), [["existing", "node", "passed"], ["generated", "node", "passed"]]);
+    assert.equal(coverageGaps(unitSession).length, 0);
     assert.equal(git("branch", "--show-current"), "feature");
     assert.equal(git("status", "--porcelain"), before);
     await assert.rejects(collectBranch({ repo, base: "HEAD", local: false }), /No reviewable changes/);
