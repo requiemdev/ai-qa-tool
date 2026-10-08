@@ -43,6 +43,13 @@ const eligible = /\.(?:[cm]?[jt]sx?|html?|css|scss|sass|json)$/i;
 const testPath =
   /(?:^|\/)(?:__tests__\/|test\/|tests\/)|\.(?:test|spec)\.[cm]?[jt]sx?$/i;
 
+/** Detected runners take precedence over the tool's default unit runner. */
+export function availableRunners(context?: Pick<BranchContext, "runners">): Runner[] {
+  return context?.runners.length
+    ? context.runners
+    : [{ kind: "vitest", tests: [], config: null }];
+}
+
 /**
  * Identifies potential base branch names (e.g. main, master, or origin/HEAD)
  * for comparison within the repository.

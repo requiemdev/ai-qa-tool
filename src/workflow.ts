@@ -390,6 +390,9 @@ export async function check(
           );
         }
         ui.section("Branch context");
+        if (!session.context.runners.length) {
+          ui.show("Default unit runner: tool-supplied Vitest (Node environment).");
+        }
         ui.show(
           `Target branch ${session.context.branch || "(detached)"}\nHead ${session.context.head}\nComparison reference ${session.input.base} (${session.context.base})\nMerge base ${session.context.mergeBase}\nCommits:\n${session.context.commits.map((item) => item.sha.slice(0, 8) + " " + item.subject + (item.body ? "\n" + item.body : "")).join("\n") || "(none)"}\nChanged areas:\n${session.context.changes.map((item) => item.status + " " + item.path).join("\n")}\nDetected runners: ${session.context.runners.map((item) => item.kind).join(", ") || "none"}\nUncommitted work (${session.input.local ? "included" : "excluded"}): ${session.context.localChanges?.map(item => item.status + " " + item.path).join(", ") || "none"}\nUntracked paths: ${session.context.untracked.join(", ") || "none"}\nExcluded files: ${session.context.skipped.join(", ") || "none"}`,
         );
