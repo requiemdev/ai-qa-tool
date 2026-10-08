@@ -19,6 +19,7 @@ import {
   baseCandidates,
   createSnapshot,
   detectRunners,
+  availableRunners,
 } from "../src/branch.js";
 import {
   newSession,
@@ -597,8 +598,36 @@ test("malformed AI output, unsupported setups and incomplete results never becom
   }
 });
 
-test("standard browser validation accepts delegated Playwright support assertions", async () => {
+test("normal features require unit tests or an explicit gap and preserve detected runners", async () => {
   const session = await newSession({ ...input, depth: "standard" });
+  try {
+    session.scenarios = [scenario];
+    const unit = { ...generated, kind: "unit", runner: "vitest", content: "import {test,expect} from 'vitest'; test('feature', () => expect(1).toBe(1));" };
+    assert.deepEqual(availableRunners(), [{ kind: "vitest", tests: [], config: null }]);
+    assert.equal(validateTests({ tests: [unit], gaps: [] }, session).tests[0]!.runner, "vitest");
+    assert.throws(() => validateTests({ tests: [generated], gaps: [] }, session), /require unit tests/);
+    assert.throws(() => validateTests({ tests: [{ ...unit, kind: "integration" }], gaps: [] }, session), /require unit tests/);
+    assert.throws(() => validateTests({ tests: [generated], gaps: ["Selectors unobserved for browser coverage."] }, session), /require unit tests/);
+    assert.equal(validateTests({ tests: [generated], gaps: ["Unit coverage unavailable: markup-only feature has no executable logic."] }, session).tests.length, 1);
+    for (const kind of ["node", "jest", "vitest"] as const) {
+      session.context = {
+        repo: input.repo, comparison: "main", changes: [], untracked: [], files: [], imported: [], skipped: [],
+        head: "fixture", base: "main", mergeBase: "fixture", branch: "feature", local: false, commits: [], tree: [],
+        runners: [{ kind, tests: [], config: null }],
+      };
+      assert.equal(availableRunners(session.context), session.context.runners);
+      assert.equal(validateTests({ tests: [{ ...unit, runner: kind }], gaps: [] }, session).tests[0]!.runner, kind);
+      if (kind !== "vitest") {
+        assert.throws(() => validateTests({ tests: [unit], gaps: [] }, session), /Unsupported/);
+      }
+    }
+  } finally {
+    await rm(session.dir, { recursive: true, force: true });
+  }
+});
+
+test("standard browser validation accepts delegated Playwright support assertions", async () => {
+  const session = await newSession({ ...input, depth: "standard", changeType: "bug-fix" });
   try {
     session.scenarios = [scenario];
     const browser = {
@@ -715,7 +744,9 @@ test("editor changes create a new unapproved revision while originals remain imm
   const savedVisual = process.env.VISUAL;
   try {
     session.scenarios = [scenario];
-    const validated = validateTests({ tests: [generated], gaps: [] }, session);
+    const gap = "Unit coverage unavailable: this feature changes markup only.";
+    const validated = validateTests({ tests: [generated], gaps: [gap] }, session);
+    session.gaps.push("Revision 1: " + gap);
     const dir = join(session.dir, "revision-1");
     await mkdir(join(dir, "tests/tests"), { recursive: true });
     await writeFile(join(dir, "tests", generated.path), generated.content);
@@ -752,6 +783,7 @@ test("editor changes create a new unapproved revision while originals remain imm
       session.revisions[0]!.tests[0]!.sha256,
     );
     assert.equal(session.revisions[1]!.review, "");
+    assert(session.gaps.includes("Revision 2: " + gap));
   } finally {
     if (savedEditor === undefined) {
       delete process.env.EDITOR;
@@ -810,12 +842,18 @@ const scenario = {title:'Show After',criteria:['AC1'],kind:'normal',steps:['Open
 const test = ${JSON.stringify({ ...generated, content: "import {test,expect} from '@playwright/test'; test('After', async ({page}) => { await page.goto('http://127.0.0.1:3000/'); await expect(page.getByRole('heading')).toHaveText('After'); });" })};
 const unit = {...test, id:'T2', path:'tests/unit.test.cjs', kind:'unit', runner:'node', content:"const test = require('node:test'); const assert = require('node:assert/strict'); const { value } = require('../value.cjs'); const { expected } = require('./unit-helper.cjs'); test('value', () => assert.equal(value, expected));", supportIds:['H1']};
 const support = {...unit, id:'H1', path:'tests/unit-helper.cjs', kind:'support', scenarioIds:[], content:'exports.expected = 1;', supportIds:[]};
+const fallback = prompt.includes('fallback-vitest fixture');
+const vitestUnit = {...unit, path:'tests/unit.test.js', runner:'vitest', content:"import {test,expect} from 'vitest'; import {value} from '../value.cjs'; import {expected} from './unit-helper.js'; test('value', () => expect(value).toBe(expected));"};
+const vitestSupport = {...support, path:'tests/unit-helper.js', runner:'vitest', content:'export const expected = 1;'};
 const candidate = {scenarioIds:['S1'],title:'Clarify confirmation',observed:'The selected flow has no clear next-step instruction.',benefit:'An explicit next step could make the completed action easier to understand.',suggestedChange:'Add a next-step instruction beside the confirmation.',priority:'low',source:['index.html:1'],evidence:[]};
 const advisory = prompt.includes('advisory fixture');
 let result;
 if (schema.properties.scenarios) result = {summary:'Changed heading',conflicts:[],gaps:[],scenarios:prompt.includes('untestable fixture') ? [] : [scenario],improvements:advisory ? [candidate, ...(prompt.includes('malformed fixture') ? [{...candidate,scenarioIds:['S999']},{...candidate,source:['unknown.ts:1']}] : [])] : []};
 else if (schema.properties.flows) result = {flows:[{scenarioId:'S1',status:'observed',steps:['Open page'],observed:'After appears; getByRole heading observed',evidence:[]}],gaps:[],improvements:advisory ? [{...candidate,evidence:['flow:S1']}, ...(prompt.includes('malformed fixture') ? [{...candidate,source:[],evidence:['made-up-screenshot.png']}] : [])] : []};
-else if (schema.properties.tests) result = {tests:prompt.includes('unit-only fixture') ? [{...unit,content:prompt.includes('failing-unit fixture') ? unit.content.replace('assert.equal(value, expected)', 'assert.equal(value, 2)') : unit.content},support] : [test,unit,support],gaps:[]};
+else if (schema.properties.tests) {
+  if (fallback && (!prompt.includes('Available unit runners: vitest') || !prompt.includes('MUST include focused unit tests'))) process.exit(2);
+  result = {tests:fallback ? [vitestUnit,vitestSupport] : prompt.includes('unit-only fixture') ? [{...unit,content:prompt.includes('failing-unit fixture') ? unit.content.replace('assert.equal(value, expected)', 'assert.equal(value, 2)') : unit.content},support] : [test,unit,support],gaps:[]};
+}
 else if (schema.properties.findings) {
   const supplied = JSON.parse(prompt.trim().split('\\n').at(-1));
   const intent = supplied.input.intent;
@@ -994,6 +1032,36 @@ writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(result));
     sessions.push(missingBase.dir);
     assert.match(missingBaseUi.prompts[0]!, /^Comparison reference/);
     assert.equal(missingBase.input.base, "HEAD");
+    // No unit runner, with unrelated tests and a Vite config that must never load.
+    git("branch", "main");
+    await writeFile(join(repo, "package.json"), JSON.stringify({ type: "module" }));
+    await rm(join(repo, "existing.test.cjs"));
+    await mkdir(join(repo, "tests"));
+    await writeFile(join(repo, "tests/unit.test.js.extra.test.js"), "throw new Error('Unselected test executed');\n");
+    await writeFile(join(repo, "vite.config.mjs"), "throw new Error('Target Vite config loaded');\n");
+    git("add", "."); git("commit", "-qm", "Feature without unit runner");
+    for (const value of [1, 2]) {
+      if (value === 2) {
+        await writeFile(join(repo, "value.cjs"), "exports.value = 2;\n");
+        git("add", "value.cjs"); git("commit", "-qm", "Feature regression");
+      }
+      const targetStatus = git("status", "--porcelain");
+      const fallbackUi = new WorkflowTerminal(["run all"]);
+      fallbackUi.execute = true;
+      const fallbackSession = await check({ repo, url: input.url, intent: "fallback-vitest fixture", committedOnly: true }, fallbackUi);
+      sessions.push(fallbackSession.dir);
+      assert(fallbackSession.context, fallbackSession.reason);
+      assert.deepEqual(fallbackSession.context!.runners, []);
+      assert.equal(fallbackUi.prompts.length, 1);
+      assert.deepEqual(fallbackSession.executions.map(run => [run.phase, run.runner, run.status]), [["generated", "vitest", value === 1 ? "passed" : "failed"]], JSON.stringify(fallbackSession.executions));
+      assert.equal(fallbackSession.status, value === 1 ? "passed" : "failed", fallbackSession.reason);
+      assert.equal(fallbackSession.gaps.length, 0);
+      assert.equal(git("status", "--porcelain"), targetStatus);
+      assert.equal(await readFile(join(repo, "value.cjs"), "utf8"), `exports.value = ${value};\n`);
+      for (const file of fallbackSession.revisions.at(-1)!.tests) {
+        assert.equal(await readFile(join(fallbackSession.revisions.at(-1)!.dir, "tests", file.path), "utf8"), file.content);
+      }
+    }
   } finally {
     process.env.PATH = oldPath;
     for (const dir of sessions) { await rm(dir, { recursive: true, force: true }); }
@@ -1002,7 +1070,7 @@ writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(result));
 });
 
 test("automatic reporting retains partial coverage and exposes only current passing tests without mandatory classification", async () => {
-  const session = await newSession({ ...input, depth: "standard" });
+  const session = await newSession({ ...input, depth: "standard", changeType: "bug-fix" });
   try {
     session.scenarios = [{ ...scenario, status: "selected" }];
     session.explorations = [{ scenarioId: "S1", status: "observed", steps: [], observed: "Created Ada", evidence: [] }];

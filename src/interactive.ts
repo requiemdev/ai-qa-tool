@@ -429,9 +429,12 @@ export async function editRevision(
         content: await readFile(join(dir, "tests", item.path), "utf8"),
       })),
     ),
-    gaps: [],
+    gaps: session.gaps
+      .filter(gap => gap.startsWith(`Revision ${original.number}: `))
+      .map(gap => gap.slice(`Revision ${original.number}: `.length)),
   };
   const validated = validateTests(response, session);
+  session.gaps.push(...validated.gaps.map(gap => `Revision ${number}: ${gap}`));
   session.revisions.push({
     number,
     dir,

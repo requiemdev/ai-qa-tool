@@ -20,7 +20,8 @@
     "@playwright/mcp": "0.0.83",
     "@playwright/test": "^1.63.0",
     "ora": "^9.4.1",
-    "picocolors": "^1.1.1"
+    "picocolors": "^1.1.1",
+    "vitest": "4.1.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",

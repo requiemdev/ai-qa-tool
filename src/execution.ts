@@ -15,10 +15,10 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile, readFile, lstat } from "node:fs/promises";
+import { mkdir, writeFile, readFile, lstat, symlink, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
-import { createSnapshot } from "./branch.js";
+import { createSnapshot, availableRunners } from "./branch.js";
 import { command } from "./process.js";
 import { record } from "./contracts.js";
 import { resultStatus, fileStatus, failureText } from "./runner-results.js";
@@ -150,7 +150,8 @@ async function executeGroup(
           ...tests.map((item) => item.path),
         ];
       } else {
-        const pkg = resolver.resolve(runner + "/package.json");
+        const fallback = runner === "vitest" && !session.context!.runners.length;
+        const pkg = (fallback ? require : resolver).resolve(runner + "/package.json");
         cli = join(
           dirname(pkg),
           runner === "vitest" ? "vitest.mjs" : "bin/jest.js",
@@ -177,6 +178,14 @@ async function executeGroup(
                 "--json",
                 "--outputFile=" + join(dir, "results.json"),
               ];
+        if (fallback) {
+          const config = join(dir, "vitest.config.mjs");
+          await writeFile(config, "export default " + JSON.stringify({
+            root: source,
+            test: { environment: "node", include: tests.map(item => item.path) },
+          }) + ";\n", { mode: 0o600 });
+          args.push("--config", config);
+        }
       }
     }
     progress(`Running ${phase} ${runner} tests (${tests.length} files).`);
@@ -337,10 +346,19 @@ export async function executeRevision(
   if (localTests.length) {
     try {
       const snapshot = await createSnapshot(session.context!, dir);
+      if (!session.context!.runners.length) {
+        const modules = join(snapshot, "node_modules");
+        await mkdir(modules, { recursive: true });
+        const vitest = join(modules, "vitest");
+        if (await lstat(vitest).catch(() => null)) {
+          await unlink(vitest);
+        }
+        await symlink(dirname(require.resolve("vitest/package.json")), vitest);
+      }
       const runners = [...new Set(localTests.map((item) => item.runner))];
       // Establish baseline BEFORE adding any generated files/support to the selected source.
       for (const runner of runners) {
-        const paths = session.context!.runners.find(
+        const paths = availableRunners(session.context).find(
           (item) => item.kind === runner,
         )!.tests;
         if (paths.length) {
@@ -361,9 +379,7 @@ export async function executeRevision(
             progress,
           );
         } else {
-          session.gaps.push(
-            `${runner}: no existing tests available for a baseline.`,
-          );
+          progress(`${runner}: no existing tests available for a baseline.`);
         }
       }
       for (const test of tests.filter((item) => item.runner !== "playwright")) {
